@@ -7,13 +7,23 @@ description = "Minimal uptime monitor: HTTP checks, dead man's switch heartbeat,
 repository = "https://github.com/bendiksolheim/varde"
 
 [dependencies]
+axum = "0.8"
 jiff = "0.2"
+# 0.12 pinned deliberately: 0.13 dropped rustls-tls-webpki-roots (defaults to aws-lc-rs +
+# platform verifier, neither of which suits a FROM scratch image).
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-webpki-roots"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_path_to_error = "0.1"
-tokio = { version = "1", features = ["time"] }
+tokio = { version = "1", features = ["macros", "net", "rt", "signal", "time"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url = "2"
 
 [dev-dependencies]
+http-body-util = "0.1"
+libc = "0.2"
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt", "test-util", "time"] }
+tower = { version = "0.5", features = ["util"] }
+wiremock = "0.6"
