@@ -55,8 +55,9 @@ compatible**; everything else is a clean rewrite.
 - **Startup blindness lasts seconds, not minutes:** every service is checked immediately at
   startup (then on schedule), so the in-memory picture fills fast.
 - **The `httpbin` heartbeat type is kept** for config compatibility even though it pings a
-  test site and alerts nobody (it existed as a dev stub). The current production config
-  actually uses `httpbin`; cutover (Phase 6, step 5) switches it to `healthchecks.io`.
+  test site and alerts nobody (it existed as a dev stub). (Correction 2026-07-18: the
+  actual production config already uses `healthchecks.io`, so Phase 6 step 5's
+  httpbin-to-healthchecks switch is moot — but the type stays for old configs.)
 
 ---
 
@@ -553,9 +554,12 @@ uses calendar forms, and the extra dependency + rewrite layer isn't worth the bo
   `(Config, Vec<Warning>)` rather than logging directly, so this is testable).
 - `CONFIG_PATH` override honored; default path used when unset.
 
-**Exit criteria:** `cargo test` green; parsing the real production config succeeds — it
-lives at `config/config.json` in the legacy repo (6 services, `httpbin` heartbeat, one
-ntfy topic); copy it into `tests/fixtures/` as the canonical legacy fixture.
+**Exit criteria:** `cargo test` green; parsing the real production config succeeds.
+(Reality check 2026-07-18: the production config has 4 services, a `healthchecks.io`
+heartbeat, and one ntfy topic — not the 6-service/`httpbin` shape this plan assumed.
+A **sanitized** copy — placeholder UUID and ntfy topic, everything else verbatim — lives
+in `tests/fixtures/production.json` as the canonical legacy fixture; the real values stay
+out of the repo since the ntfy topic and hc-ping UUID are write-capable secrets.)
 
 ### Phase 2 — schedule module
 

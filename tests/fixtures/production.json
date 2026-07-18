@@ -1,0 +1,40 @@
+{
+  "services": [
+    {
+      "service": "nas",
+      "schedule": "Every 10 minutes",
+      "url": "http://192.168.1.200:5000",
+      "okStatusCode": 200
+    },
+    {
+      "service": "Home Assistant",
+      "schedule": "Every 10 minutes",
+      "url": "http://192.168.1.172:8123",
+      "okStatusCode": 200
+    },
+    {
+      "service": "Z-Wave JS",
+      "schedule": "Every 10 minutes",
+      "url": "http://192.168.1.172:8091/health/",
+      "okStatusCode": 200
+    },
+    {
+      "service": "Zigbee2MQTT",
+      "schedule": "Every 10 minutes",
+      "url": "http://192.168.1.172:8080/",
+      "okStatusCode": 200
+    }
+  ],
+  "heartbeat": {
+      "type": "healthchecks.io",
+      "uuid": "12345678-1234-1234-1234-123456789012",
+      "schedule": "Every 10 minutes"
+  },
+  "notify": [
+      {
+          "topic": "home-services-sanitized0000000",
+          "schedule": "Every 10 minutes",
+          "minutesBetween": 120
+      }
+    ]
+}
