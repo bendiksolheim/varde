@@ -5,7 +5,7 @@
 use std::sync::Arc;
 
 use tracing_subscriber::EnvFilter;
-use varde::{check, config, server, state::AppState};
+use varde::{check, config, heartbeat, notify, server, state::AppState};
 
 fn main() {
     tracing_subscriber::fmt()
@@ -50,9 +50,29 @@ async fn run(config: config::Config, port: u16) {
     let state = Arc::new(AppState::new(&config));
     let client = check::build_client(check::CHECK_TIMEOUT);
 
-    // Heartbeat + notify loops arrive in Phase 4.
     for service in config.services.clone() {
         tokio::spawn(check::check_loop(client.clone(), service, state.clone()));
+    }
+    if let Some(hb) = config.heartbeat.clone() {
+        // VARDE_HC_BASE_URL / VARDE_NTFY_BASE_URL are test seams (see README); the
+        // config schema stays legacy-compatible.
+        let base = heartbeat::base_url(&hb, std::env::var("VARDE_HC_BASE_URL").ok());
+        tokio::spawn(heartbeat::heartbeat_loop(
+            client.clone(),
+            state.clone(),
+            hb,
+            base,
+        ));
+    }
+    let ntfy_base = std::env::var("VARDE_NTFY_BASE_URL")
+        .unwrap_or_else(|_| notify::DEFAULT_NTFY_BASE_URL.to_string());
+    for entry in config.notify.clone() {
+        tokio::spawn(notify::notify_loop(
+            client.clone(),
+            state.clone(),
+            entry,
+            ntfy_base.clone(),
+        ));
     }
 
     let listener = match tokio::net::TcpListener::bind(("0.0.0.0", port)).await {

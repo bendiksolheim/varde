@@ -33,3 +33,10 @@ Occurrences are **wall-clock aligned** (anchored to the Unix epoch): `every 10 m
 fires at :00, :10, :20, …, not relative to process start. This matches the legacy
 later.js behavior and is stable across restarts. If a check runs long, missed
 occurrences are skipped, never replayed.
+
+## Advanced / testing
+
+`VARDE_HC_BASE_URL` and `VARDE_NTFY_BASE_URL` override the heartbeat and ntfy base URLs
+(defaults: `https://hc-ping.com` / `https://httpbin.org` per heartbeat type, and
+`https://ntfy.sh`). They exist so tests can point varde at mock upstreams; the config
+file format stays legacy-compatible.
