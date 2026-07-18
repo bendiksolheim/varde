@@ -12,6 +12,8 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
+use crate::schedule::Schedule;
+
 pub const DEFAULT_CONFIG_PATH: &str = "/config/config.json";
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -26,7 +28,10 @@ pub struct Config {
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct ServiceConfig {
     pub service: String,
-    pub schedule: String,
+    // `try_from = "String"` on Schedule parses each expression exactly once, at startup
+    // (spec §2.2.3); a bad expression fails deserialization naming the field and the
+    // original expression.
+    pub schedule: Schedule,
     pub url: String,
     #[serde(rename = "okStatusCode")]
     pub ok_status_code: u16,
@@ -36,13 +41,13 @@ pub struct ServiceConfig {
 #[serde(tag = "type")]
 pub enum HeartbeatConfig {
     #[serde(rename = "healthchecks.io")]
-    HealthchecksIo { uuid: String, schedule: String },
+    HealthchecksIo { uuid: String, schedule: Schedule },
     #[serde(rename = "httpbin")]
-    Httpbin { schedule: String },
+    Httpbin { schedule: Schedule },
 }
 
 impl HeartbeatConfig {
-    pub fn schedule(&self) -> &str {
+    pub fn schedule(&self) -> &Schedule {
         match self {
             Self::HealthchecksIo { schedule, .. } | Self::Httpbin { schedule } => schedule,
         }
@@ -52,7 +57,7 @@ impl HeartbeatConfig {
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct NotifyConfig {
     pub topic: String,
-    pub schedule: String,
+    pub schedule: Schedule,
     #[serde(rename = "minutesBetween")]
     pub minutes_between: f64,
 }
@@ -108,9 +113,6 @@ pub enum ConfigError {
         service: String,
         code: u16,
     },
-    EmptySchedule {
-        context: String,
-    },
     InvalidUuid {
         uuid: String,
     },
@@ -154,9 +156,6 @@ impl fmt::Display for ConfigError {
                 f,
                 "service \"{service}\" has okStatusCode {code} outside 1..=599"
             ),
-            Self::EmptySchedule { context } => {
-                write!(f, "{context}: schedule must not be empty")
-            }
             Self::InvalidUuid { uuid } => write!(
                 f,
                 "heartbeat uuid \"{uuid}\" is not a hyphenated 8-4-4-4-12 hex UUID"
@@ -276,19 +275,13 @@ fn validate(config: &Config) -> Result<(), ConfigError> {
                 code: service.ok_status_code,
             });
         }
-        validate_schedule(
-            &service.schedule,
-            &format!("service \"{}\"", service.service),
-        )?;
     }
 
-    if let Some(heartbeat) = &config.heartbeat {
-        if let HeartbeatConfig::HealthchecksIo { uuid, .. } = heartbeat
-            && !is_loose_uuid(uuid)
-        {
-            return Err(ConfigError::InvalidUuid { uuid: uuid.clone() });
-        }
-        validate_schedule(heartbeat.schedule(), "heartbeat")?;
+    if let Some(heartbeat) = &config.heartbeat
+        && let HeartbeatConfig::HealthchecksIo { uuid, .. } = heartbeat
+        && !is_loose_uuid(uuid)
+    {
+        return Err(ConfigError::InvalidUuid { uuid: uuid.clone() });
     }
 
     let mut topics = HashSet::new();
@@ -307,10 +300,6 @@ fn validate(config: &Config) -> Result<(), ConfigError> {
                 value: notify.minutes_between,
             });
         }
-        validate_schedule(
-            &notify.schedule,
-            &format!("notify topic \"{}\"", notify.topic),
-        )?;
     }
     Ok(())
 }
@@ -326,17 +315,6 @@ fn validate_url(service: &ServiceConfig) -> Result<(), ConfigError> {
             service: service.service.clone(),
             url: service.url.clone(),
             reason: format!("scheme must be http or https, got \"{}\"", parsed.scheme()),
-        });
-    }
-    Ok(())
-}
-
-/// Phase 1 placeholder: schedules only need to be non-empty. Phase 2 replaces this with
-/// the real parser (spec §6, Phase 2 tasks).
-fn validate_schedule(schedule: &str, context: &str) -> Result<(), ConfigError> {
-    if schedule.is_empty() {
-        return Err(ConfigError::EmptySchedule {
-            context: context.to_string(),
         });
     }
     Ok(())
@@ -390,21 +368,23 @@ mod tests {
         assert_eq!(warnings, vec![]);
         assert_eq!(config.services.len(), 2);
         assert_eq!(config.services[0].service, "Home Assistant");
-        assert_eq!(config.services[0].schedule, "Every 10 minutes");
+        assert_eq!(config.services[0].schedule.to_string(), "Every 10 minutes");
+        assert_eq!(config.services[0].schedule.interval_seconds(), 600);
         assert_eq!(config.services[0].url, "http://192.168.1.89:4357");
         assert_eq!(config.services[0].ok_status_code, 200);
         assert_eq!(config.services[1].service, "Nginx redirect");
+        assert_eq!(config.services[1].schedule.interval_seconds(), 60);
         assert_eq!(config.services[1].ok_status_code, 301);
         assert_eq!(
             config.heartbeat,
             Some(HeartbeatConfig::HealthchecksIo {
                 uuid: "12345678-1234-1234-1234-123456789012".into(),
-                schedule: "Every 10 minutes".into()
+                schedule: crate::schedule::parse("Every 10 minutes").unwrap()
             })
         );
         assert_eq!(config.notify.len(), 1);
         assert_eq!(config.notify[0].topic, "my-ntfy-topic");
-        assert_eq!(config.notify[0].schedule, "Every 10 minutes");
+        assert_eq!(config.notify[0].schedule.to_string(), "Every 10 minutes");
         assert_eq!(config.notify[0].minutes_between, 120.0);
     }
 
@@ -452,7 +432,7 @@ mod tests {
         assert_eq!(
             config.heartbeat,
             Some(HeartbeatConfig::Httpbin {
-                schedule: "every 1 minute".into()
+                schedule: crate::schedule::parse("every 1 minute").unwrap()
             })
         );
         assert_eq!(warnings, vec![]);
@@ -581,6 +561,29 @@ mod tests {
     }
 
     #[test]
+    fn bad_schedule_rejected_naming_expression_and_field() {
+        // Config integration for §6 Phase 2: the startup error names the expression.
+        let err = load_str(&one_service("schedule", r#""banana""#)).unwrap_err();
+        assert!(err.to_string().contains("\"banana\""), "got: {err}");
+        assert!(
+            err.to_string().contains("services[0].schedule"),
+            "got: {err}"
+        );
+
+        let json = r#"{"services": [], "heartbeat": {"type": "httpbin",
+            "schedule": "every 0 minutes"}}"#;
+        let err = load_str(json).unwrap_err();
+        assert!(err.to_string().contains("every 0 minutes"), "got: {err}");
+        assert!(err.to_string().contains("heartbeat"), "got: {err}");
+
+        let json = r#"{"services": [], "notify": [
+            {"topic": "t", "schedule": "every -5 minutes", "minutesBetween": 1}
+        ]}"#;
+        let err = load_str(json).unwrap_err();
+        assert!(err.to_string().contains("every -5 minutes"), "got: {err}");
+    }
+
+    #[test]
     fn duplicate_service_names_rejected() {
         let json = r#"{"services": [
             {"service": "a", "schedule": "every 1 minute", "url": "http://x", "okStatusCode": 200},
@@ -682,6 +685,34 @@ mod tests {
     fn non_object_root_rejected() {
         let err = load_str("[1, 2]").unwrap_err();
         assert!(matches!(err, ConfigError::Shape { .. }));
+    }
+
+    #[test]
+    fn wrong_typed_sections_rejected_without_walk_panics() {
+        // The unknown-key walk runs before typed deserialization and must shrug at
+        // sections of the wrong JSON type; the typed pass reports the real error.
+        for bad in [
+            r#"{"services": 42}"#,
+            r#"{"services": [42]}"#,
+            r#"{"heartbeat": 42, "services": []}"#,
+            r#"{"notify": [42], "services": []}"#,
+        ] {
+            let err = load_str(bad).unwrap_err();
+            assert!(matches!(err, ConfigError::Shape { .. }), "for {bad}");
+        }
+    }
+
+    #[test]
+    fn heartbeat_schedule_accessor_covers_both_variants() {
+        let hc = HeartbeatConfig::HealthchecksIo {
+            uuid: "12345678-1234-1234-1234-123456789012".into(),
+            schedule: crate::schedule::parse("every 1 minute").unwrap(),
+        };
+        let httpbin = HeartbeatConfig::Httpbin {
+            schedule: crate::schedule::parse("every 2 hours").unwrap(),
+        };
+        assert_eq!(hc.schedule().interval_seconds(), 60);
+        assert_eq!(httpbin.schedule().interval_seconds(), 7200);
     }
 
     #[test]

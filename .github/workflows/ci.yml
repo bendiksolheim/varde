@@ -12,7 +12,11 @@ jobs:
       # Reads rust-toolchain.toml; includes built-in Swatinem/rust-cache.
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
-          components: rustfmt, clippy
+          components: rustfmt, clippy, llvm-tools
+      - uses: taiki-e/install-action@cargo-llvm-cov
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
-      - run: cargo test
+      # Runs the test suite under coverage; 100% line coverage is the contract (rust.md §5).
+      # main.rs is process wiring, exercised by the end-to-end test (spec §5.5) instead of
+      # unit coverage — the one anticipated exclusion.
+      - run: cargo llvm-cov --all-targets --fail-under-lines 100 --ignore-filename-regex 'src/main\.rs'

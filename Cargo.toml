@@ -7,10 +7,13 @@ description = "Minimal uptime monitor: HTTP checks, dead man's switch heartbeat,
 repository = "https://github.com/bendiksolheim/varde"
 
 [dependencies]
+jiff = "0.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_path_to_error = "0.1"
+tokio = { version = "1", features = ["time"] }
 url = "2"
 
 [dev-dependencies]
 tempfile = "3"
+tokio = { version = "1", features = ["macros", "rt", "test-util", "time"] }
