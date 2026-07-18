@@ -1,0 +1,3 @@
+[toolchain]
+# Pinned deliberately; bump on purpose, never implicitly (see rust.md Phase 0).
+channel = "1.97.1"

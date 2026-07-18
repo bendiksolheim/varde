@@ -1,0 +1,9 @@
+[package]
+name = "varde"
+version = "0.1.0"
+edition = "2024"
+license = "ISC"
+description = "Minimal uptime monitor: HTTP checks, dead man's switch heartbeat, ntfy notifications"
+repository = "https://github.com/bendiksolheim/varde"
+
+[dependencies]
