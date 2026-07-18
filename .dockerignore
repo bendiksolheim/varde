@@ -1,0 +1,5 @@
+.git
+.github
+target
+docker-compose.example.yml
+rust.md

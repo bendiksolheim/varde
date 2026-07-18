@@ -20,3 +20,37 @@ jobs:
       # main.rs is process wiring, exercised by the end-to-end test (spec §5.5) instead of
       # unit coverage — the one anticipated exclusion.
       - run: cargo llvm-cov --all-targets --fail-under-lines 100 --ignore-filename-regex 'src/main\.rs'
+
+  # Build the amd64 image and prove the FROM scratch binary runs, mounts a config,
+  # checks a live service, and serves GET / (rust.md §6 Phase 5).
+  container-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t varde-smoke .
+      - name: Run container against a local mock and assert GET /
+        run: |
+          python3 -m http.server 8000 &
+          mkdir -p /tmp/varde-config
+          cat > /tmp/varde-config/config.json <<'EOF'
+          {
+            "services": [
+              {
+                "service": "mock",
+                "schedule": "every 1 seconds",
+                "url": "http://127.0.0.1:8000",
+                "okStatusCode": 200
+              }
+            ]
+          }
+          EOF
+          docker run -d --name varde --network host -v /tmp/varde-config:/config varde-smoke
+          for i in $(seq 1 20); do
+            if curl -fsS http://127.0.0.1:3000/ | tee /tmp/out.json | grep -q '"ok":true'; then
+              echo "smoke test OK"
+              docker rm -f varde
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "smoke test failed"; cat /tmp/out.json || true; docker logs varde; exit 1
