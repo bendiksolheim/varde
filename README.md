@@ -1,29 +1,42 @@
 # varde
 
-A minimal uptime monitor for a home server, written in Rust. A *varde* is the old
-Norwegian beacon cairn — a signal fire kept burning so the next station notices when it
-goes out. That is the design in one word: varde does not alert by itself; it keeps a
-signal burning that external services watch.
+A minimal uptime monitor used to keep track of the current status of your services and tell you
+when they don’t. Works by pinging configured services on a schedule and keeping track of the current
+situation. Reports to healthchecks.io and optionally notifies you directly via https://ntfy.sh.
 
-- **Checks services over HTTP** on per-service schedules; a service is up when the
+## Features
+
+Intentionally minimal feature set. Prioritizes a low resource footprint over features.
+
+- **Checks services over HTTP** on a per-service schedule. A service is up when the
   response status matches the configured code exactly.
-- **Keeps only the latest result per service in memory** — no database, no history.
 - **Reports upstream via a heartbeat** (dead man's switch): if *everything* is up, it
-  pings [healthchecks.io](https://healthchecks.io); if anything is down — or the monitor
+  pings [healthchecks.io](https://healthchecks.io): if anything is down — or the monitor
   itself has died — the ping goes missing and healthchecks.io raises the alarm.
 - **Sends push notifications via [ntfy.sh](https://ntfy.sh)**: a rate-limited reminder
   while an outage lasts, one "all back up" message on recovery.
-- **Serves exactly one endpoint**, `GET /`, returning status as JSON. No web UI.
+- **Reports the current status over HTTP**: `GET /`, returning status as JSON. No web UI.
 
-It replaces a Next.js/Node.js implementation; the config file format is inherited and
-stays compatible. Runtime footprint is a single-digit-MB RSS and a `FROM scratch` image.
+## Installation
+
+It is currently only distributed as a container image on Docker Hub: [`bendiksolheim/varde`](https://hub.docker.com/r/bendiksolheim/varde).
+
+See [`docker-compose.example.yml`](docker-compose.example.yml) for an example.
+
+### Environment variables
+
+| Variable | Default | Description |
+|---|---|---|
+| `CONFIG_PATH` | `/config/config.json` | config file location |
+| `PORT` | `3000` | listen port (1–65535); the bind address is always `0.0.0.0` |
+| `RUST_LOG` | `info` | log filter (`debug` shows every check result) |
 
 ## Configuration
 
-Read from `/config/config.json`, overridable with the `CONFIG_PATH` environment
-variable. The process refuses to start on a config it cannot fully honor, naming the
-offending field. Unknown keys are accepted with a warning (typos surface in the logs);
-the legacy `nodes` key is accepted and ignored.
+Reads from `/config/config.json` by default, overridable with the `CONFIG_PATH` environment
+variable.
+
+Example config file:
 
 ```json
 {
@@ -56,43 +69,64 @@ the legacy `nodes` key is accepted and ignored.
 }
 ```
 
-| Field | Meaning |
-|---|---|
-| `services[].service` | display name; must be unique and non-empty |
-| `services[].schedule` | check schedule (see [Schedules](#schedules)) |
-| `services[].url` | absolute `http`/`https` URL; redirects are **not** followed — a 301 is compared as-is against `okStatusCode` |
-| `services[].okStatusCode` | the one status code (1–599) that counts as up |
-| `heartbeat` | optional; `type` is `"healthchecks.io"` (requires `uuid`) or `"httpbin"` (a legacy dev stub that alerts nobody) |
-| `notify[].topic` | ntfy.sh topic; one rate-limit window per entry |
-| `notify[].minutesBetween` | minimum minutes between down-messages (fractional OK, `0` = every tick) |
+### Field specification
 
-Checks GET the URL with a 10-second timeout and never read the body. Latency (whole
-milliseconds, headers-only) is recorded for every completed response — also wrong-status
-ones; only transport errors (timeout, refused, DNS, TLS) yield no latency.
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `services` | Object | Yes | Contains a list of services to ping |
+| `heartbeat` | Object | No | Optional. `type` must be `"healthchecks.io"` as this is the only supported service for now |
+| `notify` | Object | No | Optional. Uses `ntfy.sh` to notify you on status changes |
+
+#### Services
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `service` | String | Yes | Name of the service to make them distinguishable from each other |
+| `schedule` | String | Yes | How often this check should run. See #schedules for format |
+| `url` | Url (String) | Yes | A valid, absolute, URL you want to ping |
+| `okStatusCode` | Number | Yes | The status code you expect from a healthy call |
+
+There is a set, non configurable timeout of **10 seconds** at the moment.
+
+#### Heartbeat
+
+Supports sending a heartbeat to healthchecks.io.
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `type` | Enum (String) | Yes | The type of heartbeat. Currently "healthchecks.io" is the only supported one |
+| `uuid` | UUID (String) | Yes | Your heathlchecks.io UUID |
+| `schedule` | String | Yes | How often the heartbeat should ping healthchecks.io. Correspond this to what you configure on healthchecks.io. See #schedules for format |
+
+#### Notifications
+
+Supports sending notifications via ntfy.sh.
+
+| Field | Type | Required | Descriptions |
+|---|---|---|---|
+| `topic` | String | Yes | Your ntfy.sh topic |
+| `schedule` | String | Yes | How often the status should be checked to consider sending a notification. See #schedules for format |
+| `minutesBetween` | Number | Yes | In case a service is down over a prolonged amount of time, how long should we wait before sendint a repeat message? |
 
 ## Schedules
 
-Schedule expressions use the interval grammar:
+Schedules are expressed as repeat intervals:
 
 ```
 every N seconds|minutes|hours|days     (N ≥ 1)
 ```
 
-Parsing is case-insensitive and tolerant of singular/plural mismatches and extra
-whitespace — `Every 10 minutes`, `every 1 minutes`, and `every 1 minute` all work.
-Calendar expressions from the legacy grammar (`every weekday at 09:00`) are **not**
-supported and fail at startup with an error naming the expression.
+They are case-insensitive and tolerant of singular/plural mismatches.
 
 Occurrences are **wall-clock aligned** (anchored to the Unix epoch): `every 10 minutes`
-fires at :00, :10, :20, …, not relative to process start — matching the legacy later.js
-behavior, stable across restarts. Every service is also checked once immediately at
+fires at :00, :10, :20, …, stable across restarts. Every service is also checked once immediately at
 startup. If a check runs long, missed occurrences are skipped, never replayed. The
 heartbeat and notify loops first fire at their first scheduled occurrence, giving the
 initial round of checks time to land.
 
 ## Status endpoint
 
-`GET /` returns compact JSON; every other path or method is 404.
+`GET /` returns current status as compact JSON.
 
 ```json
 {
@@ -106,48 +140,16 @@ initial round of checks time to land.
 }
 ```
 
-- One entry per configured service, in config order; never-checked services have all
-  three fields `null` and do not count against `operational`.
+- Never-checked services have all three fields `null` and do not count against `operational`.
 - HTTP status is **200 when operational, 500 otherwise**, so an external checker can
   watch the monitor itself without parsing JSON.
 - `lastChecked` is UTC, RFC 3339, second precision.
 
-## Notifications
+## Release new versions
 
-While services are failing, each ntfy topic receives at most one message per
-`minutesBetween` window: `Title: Service down`, `Tags: warning`, body like
-`2 services down: a and b`. When everything recovers, one message —
-`Title: Services recovered`, `Tags: white_check_mark`, body `All services back up` —
-and the rate-limit window resets. Sends only count on a 2xx response; failed sends are
-retried at the next tick. Rate-limit state is in memory: a restart mid-outage may
-re-notify once (accepted trade-off).
-
-## Deployment
-
-Multi-arch images (amd64/arm64) are published as
-[`bendiksolheim/varde`](https://hub.docker.com/r/bendiksolheim/varde) by tagging
-`vX.Y.Z`; the image is `FROM scratch` (CA roots are compiled in via rustls).
-
-```yaml
-services:
-  varde:
-    image: bendiksolheim/varde:latest
-    restart: unless-stopped
-    volumes:
-      - ./config:/config
-    ports:
-      - 3000:3000
-```
-
-### Environment variables
-
-| Variable | Default | Meaning |
-|---|---|---|
-| `CONFIG_PATH` | `/config/config.json` | config file location |
-| `PORT` | `3000` | listen port (1–65535); the bind address is always `0.0.0.0` |
-| `RUST_LOG` | `info` | log filter (`debug` shows every check result) |
-
-Graceful shutdown on SIGTERM/SIGINT: stop serving, drop in-flight work, exit 0.
+Multi-arch images (amd64/arm64) are published at
+[`bendiksolheim/varde`](https://hub.docker.com/r/bendiksolheim/varde) by creating a new release with
+the tab `vX.Y.Z`.
 
 ## Development
 
@@ -156,9 +158,10 @@ Run with Cargo:
 CONFIG_PATH={path-to-config-file} RUST_LOG={debug} cargo run
 ```
 
-### Building container locally with Apple's container
+### Build a container locally
 
-Install [`container` CLI](https://github.com/apple/container). Also works with Docker.
+Example here uses [`container` CLI](https://github.com/apple/container). Also works with Docker if
+you prefer that.
 
 ```sh
 container build -t varde:local .
@@ -174,12 +177,10 @@ cargo llvm-cov --all-targets \
   --ignore-filename-regex 'src/main\.rs'     # the CI coverage gate (100% is the contract)
 ```
 
-CI enforces `cargo fmt`, `clippy -D warnings`, the 100% line-coverage gate, and a Docker
-smoke test. `src/main.rs` is process wiring, excluded from unit coverage and exercised by
+CI enforces `cargo fmt`, `clippy -D warnings`, 100% line-coverage, and a Docker
+smoke test. `src/main.rs` excluded from unit coverage and exercised by
 `tests/e2e.rs` instead (spawns the real binary against mock upstreams).
 
 For tests, `VARDE_HC_BASE_URL` and `VARDE_NTFY_BASE_URL` override the heartbeat and ntfy
 base URLs (defaults: `https://hc-ping.com` / `https://httpbin.org` per heartbeat type,
 and `https://ntfy.sh`). The config file format stays legacy-compatible.
-
-The full specification and implementation plan lives in [`rust.md`](rust.md).

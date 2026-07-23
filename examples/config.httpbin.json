@@ -1,0 +1,14 @@
+{
+  "services": [
+    {
+      "service": "vg.no",
+      "schedule": "Every 10 seconds",
+      "url": "https://www.vg.no",
+      "okStatusCode": 200
+    }
+  ],
+  "heartbeat": {
+    "type": "httpbin",
+    "schedule": "Every 1 minute"
+  }
+}

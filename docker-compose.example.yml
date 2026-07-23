@@ -1,5 +1,3 @@
-# Drop-in replacement for the legacy container: mount a directory containing
-# config.json at /config.
 services:
   varde:
     image: bendiksolheim/varde:latest

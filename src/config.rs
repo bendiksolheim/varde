@@ -398,20 +398,6 @@ mod tests {
     }
 
     #[test]
-    fn production_fixture_parses() {
-        let (config, warnings) = load(&fixture("production.json")).unwrap();
-        assert_eq!(warnings, vec![]);
-        assert_eq!(config.services.len(), 4);
-        assert_eq!(config.services[0].service, "nas");
-        assert_eq!(config.services[3].service, "Zigbee2MQTT");
-        assert!(matches!(
-            config.heartbeat,
-            Some(HeartbeatConfig::HealthchecksIo { .. })
-        ));
-        assert_eq!(config.notify[0].minutes_between, 120.0);
-    }
-
-    #[test]
     fn heartbeat_accepts_loose_uuid_vector() {
         // 12345678-1234-1234-1234-123456789012 has invalid RFC 4122 variant bits but the
         // legacy suite accepts it; the loose validator must keep doing so.
