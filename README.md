@@ -151,6 +151,22 @@ Graceful shutdown on SIGTERM/SIGINT: stop serving, drop in-flight work, exit 0.
 
 ## Development
 
+Run with Cargo:
+```rust
+CONFIG_PATH={path-to-config-file} RUST_LOG={debug} cargo run
+```
+
+### Building container locally with Apple's container
+
+Install [`container` CLI](https://github.com/apple/container). Also works with Docker.
+
+```sh
+container build -t varde:local .
+container run --rm -p 3000:3000 -v "$(pwd)/config:/config" varde:local
+```
+
+### Tests and coverage
+
 ```sh
 cargo test                                   # full suite incl. end-to-end binary tests
 cargo llvm-cov --all-targets \
