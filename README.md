@@ -1,8 +1,10 @@
 # varde
 
-A minimal uptime monitor used to keep track of the current status of your services and tell you
-when they don’t. Works by pinging configured services on a schedule and keeping track of the current
-situation. Reports to healthchecks.io and optionally notifies you directly via https://ntfy.sh.
+An intentionally minimal uptime monitor used to keep track of the current status of your services and tell you
+when they don’t as expected. Works by pinging configured services on a schedule and keeping track of the current
+status. Reports to healthchecks.io and optionally notifies you directly via https://ntfy.sh.
+
+Varde features no GUI, only an endpoint serving the current status as JSON.
 
 ## Features
 
