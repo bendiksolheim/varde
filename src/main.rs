@@ -15,20 +15,13 @@ fn main() {
         .init();
 
     let path = config::config_path();
-    let (config, warnings) = match config::load(&path) {
-        Ok(loaded) => loaded,
+    let config = match config::load(&path) {
+        Ok(config) => config,
         Err(e) => {
             eprintln!("error: {e}");
             std::process::exit(1);
         }
     };
-    for warning in warnings {
-        if warning.is_info() {
-            tracing::info!("{warning}");
-        } else {
-            tracing::warn!("{warning}");
-        }
-    }
 
     let port = match server::resolve_port(std::env::var("PORT").ok().as_deref()) {
         Ok(port) => port,

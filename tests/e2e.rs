@@ -57,8 +57,7 @@ async fn binary_checks_services_and_shuts_down_cleanly() {
                 "schedule": "every 1 seconds",
                 "url": mock.uri(),
                 "okStatusCode": 200
-            }],
-            "nodes": []
+            }]
         })
         .to_string(),
     )

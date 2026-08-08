@@ -1,9 +1,8 @@
-//! Configuration loading and validation (spec §2.1).
+//! Configuration loading and validation
 //!
-//! Two-pass parse: the file is first read into a generic JSON value that is walked for
-//! unknown keys (recursively — typos like `okStatuscode` must warn, not vanish), then
-//! deserialized into typed structs and semantically validated. The loader returns the
-//! warnings instead of logging them so tests can assert on them.
+//! Parsed directly into typed structs and semantically validated. Every struct/variant
+//! denies unknown fields, so a typo or a stray field anywhere fails the load instead of
+//! silently vanishing.
 
 use std::collections::HashSet;
 use std::fmt;
@@ -17,6 +16,7 @@ use crate::schedule::Schedule;
 pub const DEFAULT_CONFIG_PATH: &str = "/config/config.json";
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Config {
     pub services: Vec<ServiceConfig>,
     #[serde(default)]
@@ -26,11 +26,11 @@ pub struct Config {
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ServiceConfig {
     pub service: String,
-    // `try_from = "String"` on Schedule parses each expression exactly once, at startup
-    // (spec §2.2.3); a bad expression fails deserialization naming the field and the
-    // original expression.
+    // `try_from = "String"` on Schedule parses each expression exactly once, at startup.
+    //  A bad expression fails deserialization naming the field and the original expression.
     pub schedule: Schedule,
     pub url: String,
     #[serde(rename = "okStatusCode")]
@@ -38,7 +38,7 @@ pub struct ServiceConfig {
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
-#[serde(tag = "type")]
+#[serde(tag = "type", deny_unknown_fields)]
 pub enum HeartbeatConfig {
     #[serde(rename = "healthchecks.io")]
     HealthchecksIo { uuid: String, schedule: Schedule },
@@ -55,34 +55,12 @@ impl HeartbeatConfig {
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct NotifyConfig {
     pub topic: String,
     pub schedule: Schedule,
     #[serde(rename = "minutesBetween")]
     pub minutes_between: f64,
-}
-
-/// Non-fatal findings from the unknown-key walk. `IgnoredNodes` logs at info level,
-/// `UnknownKey` at warn level (spec §2.1).
-#[derive(Debug, Clone, PartialEq)]
-pub enum ConfigWarning {
-    IgnoredNodes,
-    UnknownKey { path: String },
-}
-
-impl ConfigWarning {
-    pub fn is_info(&self) -> bool {
-        matches!(self, Self::IgnoredNodes)
-    }
-}
-
-impl fmt::Display for ConfigWarning {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::IgnoredNodes => write!(f, "config key \"nodes\" is ignored"),
-            Self::UnknownKey { path } => write!(f, "unknown config key \"{path}\" is ignored"),
-        }
-    }
 }
 
 #[derive(Debug)]
@@ -104,24 +82,11 @@ pub enum ConfigError {
     DuplicateService {
         name: String,
     },
-    InvalidUrl {
-        service: String,
-        url: String,
-        reason: String,
-    },
     StatusCodeRange {
         service: String,
         code: u16,
     },
-    InvalidUuid {
-        uuid: String,
-    },
-    EmptyTopic {
-        index: usize,
-    },
-    DuplicateTopic {
-        topic: String,
-    },
+    EmptyUuid,
     NegativeMinutesBetween {
         topic: String,
         value: f64,
@@ -144,24 +109,11 @@ impl fmt::Display for ConfigError {
             Self::DuplicateService { name } => {
                 write!(f, "duplicate service name \"{name}\"")
             }
-            Self::InvalidUrl {
-                service,
-                url,
-                reason,
-            } => write!(
-                f,
-                "service \"{service}\" has invalid url \"{url}\": {reason}"
-            ),
             Self::StatusCodeRange { service, code } => write!(
                 f,
                 "service \"{service}\" has okStatusCode {code} outside 1..=599"
             ),
-            Self::InvalidUuid { uuid } => write!(
-                f,
-                "heartbeat uuid \"{uuid}\" is not a hyphenated 8-4-4-4-12 hex UUID"
-            ),
-            Self::EmptyTopic { index } => write!(f, "notify[{index}].topic must not be empty"),
-            Self::DuplicateTopic { topic } => write!(f, "duplicate notify topic \"{topic}\""),
+            Self::EmptyUuid => write!(f, "heartbeat uuid must not be empty"),
             Self::NegativeMinutesBetween { topic, value } => write!(
                 f,
                 "notify topic \"{topic}\" has negative minutesBetween {value}"
@@ -179,82 +131,29 @@ pub fn config_path() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(DEFAULT_CONFIG_PATH))
 }
 
-pub fn load(path: &Path) -> Result<(Config, Vec<ConfigWarning>), ConfigError> {
+pub fn load(path: &Path) -> Result<Config, ConfigError> {
     let text = fs::read_to_string(path).map_err(|source| ConfigError::Read {
         path: path.to_owned(),
         source,
     })?;
-    let value: serde_json::Value =
-        serde_json::from_str(&text).map_err(|source| ConfigError::Json { source })?;
-    let warnings = collect_warnings(&value);
-    let config: Config =
-        serde_path_to_error::deserialize(&value).map_err(|e| ConfigError::Shape {
-            location: e.path().to_string(),
-            message: e.inner().to_string(),
-        })?;
+    let mut de = serde_json::Deserializer::from_str(&text);
+    let config: Config = serde_path_to_error::deserialize(&mut de).map_err(|e| {
+        let location = e.path().to_string();
+        let source = e.into_inner();
+        match source.classify() {
+            serde_json::error::Category::Syntax | serde_json::error::Category::Eof => {
+                ConfigError::Json { source }
+            }
+            serde_json::error::Category::Data | serde_json::error::Category::Io => {
+                ConfigError::Shape {
+                    location,
+                    message: source.to_string(),
+                }
+            }
+        }
+    })?;
     validate(&config)?;
-    Ok((config, warnings))
-}
-
-const SERVICE_KEYS: &[&str] = &["service", "schedule", "url", "okStatusCode"];
-const NOTIFY_KEYS: &[&str] = &["topic", "schedule", "minutesBetween"];
-
-fn collect_warnings(root: &serde_json::Value) -> Vec<ConfigWarning> {
-    let mut warnings = Vec::new();
-    let Some(obj) = root.as_object() else {
-        return warnings; // non-object root fails typed deserialization with its own error
-    };
-    for (key, value) in obj {
-        match key.as_str() {
-            "services" => walk_entries(value, "services", SERVICE_KEYS, &mut warnings),
-            "notify" => walk_entries(value, "notify", NOTIFY_KEYS, &mut warnings),
-            "heartbeat" => {
-                // `uuid` is a known key only for healthchecks.io; a stray uuid on an
-                // httpbin heartbeat warns (spec §2.1). Unknown/missing type gets the
-                // permissive set — typed deserialization reports the real problem.
-                let known: &[&str] = match value.get("type").and_then(|t| t.as_str()) {
-                    Some("httpbin") => &["type", "schedule"],
-                    _ => &["type", "uuid", "schedule"],
-                };
-                warn_unknown_keys(value, "heartbeat", known, &mut warnings);
-            }
-            "nodes" => warnings.push(ConfigWarning::IgnoredNodes),
-            other => warnings.push(ConfigWarning::UnknownKey {
-                path: other.to_string(),
-            }),
-        }
-    }
-    warnings
-}
-
-fn walk_entries(
-    value: &serde_json::Value,
-    name: &str,
-    known: &[&str],
-    warnings: &mut Vec<ConfigWarning>,
-) {
-    if let Some(entries) = value.as_array() {
-        for (i, entry) in entries.iter().enumerate() {
-            warn_unknown_keys(entry, &format!("{name}[{i}]"), known, warnings);
-        }
-    }
-}
-
-fn warn_unknown_keys(
-    value: &serde_json::Value,
-    prefix: &str,
-    known: &[&str],
-    warnings: &mut Vec<ConfigWarning>,
-) {
-    if let Some(obj) = value.as_object() {
-        for key in obj.keys() {
-            if !known.contains(&key.as_str()) {
-                warnings.push(ConfigWarning::UnknownKey {
-                    path: format!("{prefix}.{key}"),
-                });
-            }
-        }
-    }
+    Ok(config)
 }
 
 fn validate(config: &Config) -> Result<(), ConfigError> {
@@ -268,7 +167,6 @@ fn validate(config: &Config) -> Result<(), ConfigError> {
                 name: service.service.clone(),
             });
         }
-        validate_url(service)?;
         if !(1..=599).contains(&service.ok_status_code) {
             return Err(ConfigError::StatusCodeRange {
                 service: service.service.clone(),
@@ -277,23 +175,13 @@ fn validate(config: &Config) -> Result<(), ConfigError> {
         }
     }
 
-    if let Some(heartbeat) = &config.heartbeat
-        && let HeartbeatConfig::HealthchecksIo { uuid, .. } = heartbeat
-        && !is_loose_uuid(uuid)
+    if let Some(HeartbeatConfig::HealthchecksIo { uuid, .. }) = &config.heartbeat
+        && uuid.is_empty()
     {
-        return Err(ConfigError::InvalidUuid { uuid: uuid.clone() });
+        return Err(ConfigError::EmptyUuid);
     }
 
-    let mut topics = HashSet::new();
-    for (index, notify) in config.notify.iter().enumerate() {
-        if notify.topic.is_empty() {
-            return Err(ConfigError::EmptyTopic { index });
-        }
-        if !topics.insert(notify.topic.as_str()) {
-            return Err(ConfigError::DuplicateTopic {
-                topic: notify.topic.clone(),
-            });
-        }
+    for notify in &config.notify {
         if notify.minutes_between < 0.0 {
             return Err(ConfigError::NegativeMinutesBetween {
                 topic: notify.topic.clone(),
@@ -302,35 +190,6 @@ fn validate(config: &Config) -> Result<(), ConfigError> {
         }
     }
     Ok(())
-}
-
-fn validate_url(service: &ServiceConfig) -> Result<(), ConfigError> {
-    let parsed = url::Url::parse(&service.url).map_err(|e| ConfigError::InvalidUrl {
-        service: service.service.clone(),
-        url: service.url.clone(),
-        reason: e.to_string(),
-    })?;
-    if parsed.scheme() != "http" && parsed.scheme() != "https" {
-        return Err(ConfigError::InvalidUrl {
-            service: service.service.clone(),
-            url: service.url.clone(),
-            reason: format!("scheme must be http or https, got \"{}\"", parsed.scheme()),
-        });
-    }
-    Ok(())
-}
-
-/// Loose UUID shape check (spec §2.1): hyphenated 8-4-4-4-12 hex, case-insensitive.
-/// Deliberately does NOT check RFC 4122 version/variant bits, and deliberately rejects
-/// unhyphenated/braced/URN forms the `uuid` crate would accept.
-fn is_loose_uuid(s: &str) -> bool {
-    let parts: Vec<&str> = s.split('-').collect();
-    let lens = [8, 4, 4, 4, 12];
-    parts.len() == lens.len()
-        && parts
-            .iter()
-            .zip(lens)
-            .all(|(p, len)| p.len() == len && p.chars().all(|c| c.is_ascii_hexdigit()))
 }
 
 #[cfg(test)]
@@ -343,7 +202,7 @@ mod tests {
             .join(name)
     }
 
-    fn load_str(json: &str) -> Result<(Config, Vec<ConfigWarning>), ConfigError> {
+    fn load_str(json: &str) -> Result<Config, ConfigError> {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.json");
         fs::write(&path, json).unwrap();
@@ -364,8 +223,7 @@ mod tests {
 
     #[test]
     fn full_example_parses_with_every_field() {
-        let (config, warnings) = load(&fixture("full.json")).unwrap();
-        assert_eq!(warnings, vec![]);
+        let config = load(&fixture("full.json")).unwrap();
         assert_eq!(config.services.len(), 2);
         assert_eq!(config.services[0].service, "Home Assistant");
         assert_eq!(config.services[0].schedule.to_string(), "Every 10 minutes");
@@ -390,8 +248,7 @@ mod tests {
 
     #[test]
     fn minimal_config_parses_with_defaults() {
-        let (config, warnings) = load(&fixture("minimal.json")).unwrap();
-        assert_eq!(warnings, vec![]);
+        let config = load(&fixture("minimal.json")).unwrap();
         assert_eq!(config.services, vec![]);
         assert_eq!(config.heartbeat, None);
         assert_eq!(config.notify, vec![]);
@@ -399,11 +256,9 @@ mod tests {
 
     #[test]
     fn heartbeat_accepts_loose_uuid_vector() {
-        // 12345678-1234-1234-1234-123456789012 has invalid RFC 4122 variant bits but the
-        // legacy suite accepts it; the loose validator must keep doing so.
         let json = r#"{"services": [], "heartbeat": {"type": "healthchecks.io",
             "uuid": "12345678-1234-1234-1234-123456789012", "schedule": "every 1 minute"}}"#;
-        let (config, _) = load_str(json).unwrap();
+        let config = load_str(json).unwrap();
         assert!(matches!(
             config.heartbeat,
             Some(HeartbeatConfig::HealthchecksIo { .. })
@@ -414,36 +269,23 @@ mod tests {
     fn heartbeat_accepts_httpbin_without_uuid() {
         let json =
             r#"{"services": [], "heartbeat": {"type": "httpbin", "schedule": "every 1 minute"}}"#;
-        let (config, warnings) = load_str(json).unwrap();
+        let config = load_str(json).unwrap();
         assert_eq!(
             config.heartbeat,
             Some(HeartbeatConfig::Httpbin {
                 schedule: crate::schedule::parse("every 1 minute").unwrap()
             })
         );
-        assert_eq!(warnings, vec![]);
     }
 
     #[test]
-    fn httpbin_with_stray_uuid_parses_and_warns() {
+    fn httpbin_with_stray_uuid_rejected() {
+        // `uuid` isn't a field of the httpbin variant — deny_unknown_fields rejects it
+        // instead of silently ignoring it.
         let json = r#"{"services": [], "heartbeat": {"type": "httpbin",
             "uuid": "12345678-1234-1234-1234-123456789012", "schedule": "every 1 minute"}}"#;
-        let (config, warnings) = load_str(json).unwrap();
-        assert!(matches!(
-            config.heartbeat,
-            Some(HeartbeatConfig::Httpbin { .. })
-        ));
-        assert_eq!(
-            warnings,
-            vec![ConfigWarning::UnknownKey {
-                path: "heartbeat.uuid".into()
-            }]
-        );
-        assert!(!warnings[0].is_info());
-        assert_eq!(
-            warnings[0].to_string(),
-            "unknown config key \"heartbeat.uuid\" is ignored"
-        );
+        let err = load_str(json).unwrap_err();
+        assert!(err.to_string().contains("uuid"), "got: {err}");
     }
 
     #[test]
@@ -455,18 +297,28 @@ mod tests {
     }
 
     #[test]
-    fn heartbeat_malformed_uuid_rejected() {
-        for bad in ["not-a-valid-uuid", "12345678123412341234123456789012"] {
+    fn heartbeat_uuid_shape_not_validated() {
+        // The uuid is an opaque healthchecks.io identifier, just interpolated into a
+        // ping URL — only presence is checked, not shape.
+        for accepted in ["not-a-valid-uuid", "12345678123412341234123456789012"] {
             let json = format!(
                 r#"{{"services": [], "heartbeat": {{"type": "healthchecks.io",
-                    "uuid": "{bad}", "schedule": "every 1 minute"}}}}"#
+                    "uuid": "{accepted}", "schedule": "every 1 minute"}}}}"#
             );
-            let err = load_str(&json).unwrap_err();
-            assert!(
-                err.to_string().contains(bad),
-                "error should name the uuid, got: {err}"
-            );
+            let config = load_str(&json).unwrap();
+            assert!(matches!(
+                config.heartbeat,
+                Some(HeartbeatConfig::HealthchecksIo { .. })
+            ));
         }
+    }
+
+    #[test]
+    fn heartbeat_empty_uuid_rejected() {
+        let json = r#"{"services": [], "heartbeat": {"type": "healthchecks.io",
+            "uuid": "", "schedule": "every 1 minute"}}"#;
+        let err = load_str(json).unwrap_err();
+        assert_eq!(err.to_string(), "heartbeat uuid must not be empty");
     }
 
     #[test]
@@ -504,21 +356,13 @@ mod tests {
     }
 
     #[test]
-    fn relative_url_rejected() {
-        let err = load_str(&one_service("url", r#""example.com/foo""#)).unwrap_err();
-        assert!(err.to_string().contains("example.com/foo"), "got: {err}");
-    }
-
-    #[test]
-    fn garbage_url_rejected() {
-        let err = load_str(&one_service("url", r#""not a url""#)).unwrap_err();
-        assert!(err.to_string().contains("not a url"), "got: {err}");
-    }
-
-    #[test]
-    fn non_http_scheme_rejected() {
-        let err = load_str(&one_service("url", r#""ftp://server/file""#)).unwrap_err();
-        assert!(err.to_string().contains("scheme"), "got: {err}");
+    fn url_shape_not_validated() {
+        // The check loop's own HTTP client rejects a bad url at request time (surfaced
+        // as a normal "down" result) — config load no longer re-validates it.
+        for accepted in ["example.com/foo", "not a url", "ftp://server/file"] {
+            let config = load_str(&one_service("url", &format!("{accepted:?}"))).unwrap();
+            assert_eq!(config.services[0].url, accepted);
+        }
     }
 
     #[test]
@@ -580,22 +424,17 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_notify_topics_rejected() {
+    fn duplicate_and_empty_notify_topics_accepted() {
+        // Unlike service names, notify topics aren't shared map keys — each entry runs
+        // its own independent rate-limit state, so dup/empty topics just mean
+        // redundant ntfy posts, not corrupted state. No longer rejected.
         let json = r#"{"services": [], "notify": [
             {"topic": "t", "schedule": "every 1 minute", "minutesBetween": 1},
-            {"topic": "t", "schedule": "every 1 minute", "minutesBetween": 2}
-        ]}"#;
-        let err = load_str(json).unwrap_err();
-        assert_eq!(err.to_string(), "duplicate notify topic \"t\"");
-    }
-
-    #[test]
-    fn empty_notify_topic_rejected() {
-        let json = r#"{"services": [], "notify": [
+            {"topic": "t", "schedule": "every 1 minute", "minutesBetween": 2},
             {"topic": "", "schedule": "every 1 minute", "minutesBetween": 1}
         ]}"#;
-        let err = load_str(json).unwrap_err();
-        assert_eq!(err.to_string(), "notify[0].topic must not be empty");
+        let config = load_str(json).unwrap();
+        assert_eq!(config.notify.len(), 3);
     }
 
     #[test]
@@ -613,7 +452,7 @@ mod tests {
         let json = r#"{"services": [], "notify": [
             {"topic": "t", "schedule": "every 1 minute", "minutesBetween": 1.5}
         ]}"#;
-        let (config, _) = load_str(json).unwrap();
+        let config = load_str(json).unwrap();
         assert_eq!(config.notify[0].minutes_between, 1.5);
     }
 
@@ -628,43 +467,43 @@ mod tests {
     }
 
     #[test]
-    fn nodes_key_ignored_with_info_warning() {
+    fn nodes_key_rejected() {
+        // Legacy configs from the old system carried a top-level "nodes" section;
+        // it's no longer tolerated — any unrecognized key is a hard failure.
         let json = r#"{"services": [], "nodes": [{"anything": true}]}"#;
-        let (_, warnings) = load_str(json).unwrap();
-        assert_eq!(warnings, vec![ConfigWarning::IgnoredNodes]);
-        assert!(warnings[0].is_info());
-        assert_eq!(warnings[0].to_string(), "config key \"nodes\" is ignored");
+        let err = load_str(json).unwrap_err();
+        assert!(err.to_string().contains("nodes"), "got: {err}");
     }
 
     #[test]
-    fn unknown_keys_warn_recursively() {
-        let json = r#"{
-            "services": [{"service": "a", "schedule": "every 1 minute",
-                          "url": "http://x", "okStatusCode": 200, "okStatuscode": 200}],
-            "heartbeat": {"type": "healthchecks.io",
-                          "uuid": "12345678-1234-1234-1234-123456789012",
-                          "schedule": "every 1 minute", "extra": 1},
-            "notify": [{"topic": "t", "schedule": "every 1 minute",
-                        "minutesBetween": 1, "minutesbetween": 2}],
-            "nodes": [],
-            "someTypo": true
-        }"#;
-        let (_, warnings) = load_str(json).unwrap();
-        let paths: Vec<String> = warnings.iter().map(ToString::to_string).collect();
-        assert_eq!(warnings.len(), 5, "got: {paths:?}");
-        assert!(warnings.contains(&ConfigWarning::UnknownKey {
-            path: "services[0].okStatuscode".into()
-        }));
-        assert!(warnings.contains(&ConfigWarning::UnknownKey {
-            path: "heartbeat.extra".into()
-        }));
-        assert!(warnings.contains(&ConfigWarning::UnknownKey {
-            path: "notify[0].minutesbetween".into()
-        }));
-        assert!(warnings.contains(&ConfigWarning::IgnoredNodes));
-        assert!(warnings.contains(&ConfigWarning::UnknownKey {
-            path: "someTypo".into()
-        }));
+    fn unknown_keys_rejected_everywhere() {
+        // deny_unknown_fields on every struct/variant: a typo anywhere fails the load
+        // and names the offending field, instead of silently being ignored.
+        for (bad, expect) in [
+            (r#"{"services": [], "someTypo": true}"#, "someTypo"),
+            (
+                r#"{"services": [{"service": "a", "schedule": "every 1 minute",
+                    "url": "http://x", "okStatusCode": 200, "okStatuscode": 200}]}"#,
+                "okStatuscode",
+            ),
+            (
+                r#"{"services": [], "heartbeat": {"type": "healthchecks.io",
+                    "uuid": "12345678-1234-1234-1234-123456789012",
+                    "schedule": "every 1 minute", "extra": 1}}"#,
+                "extra",
+            ),
+            (
+                r#"{"services": [], "notify": [{"topic": "t", "schedule": "every 1 minute",
+                    "minutesBetween": 1, "minutesbetween": 2}]}"#,
+                "minutesbetween",
+            ),
+        ] {
+            let err = load_str(bad).unwrap_err();
+            assert!(
+                err.to_string().contains(expect),
+                "expected {expect} in error, got: {err}"
+            );
+        }
     }
 
     #[test]
@@ -674,13 +513,12 @@ mod tests {
     }
 
     #[test]
-    fn wrong_typed_sections_rejected_without_walk_panics() {
-        // The unknown-key walk runs before typed deserialization and must shrug at
-        // sections of the wrong JSON type; the typed pass reports the real error.
+    fn wrong_typed_sections_rejected() {
         for bad in [
             r#"{"services": 42}"#,
             r#"{"services": [42]}"#,
             r#"{"heartbeat": 42, "services": []}"#,
+            r#"{"notify": 42, "services": []}"#,
             r#"{"notify": [42], "services": []}"#,
         ] {
             let err = load_str(bad).unwrap_err();
