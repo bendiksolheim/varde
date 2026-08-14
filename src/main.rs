@@ -57,15 +57,15 @@ async fn run(config: config::Config, port: u16) {
             base,
         ));
     }
-    let ntfy_base = std::env::var("VARDE_NTFY_BASE_URL")
-        .unwrap_or_else(|_| notify::DEFAULT_NTFY_BASE_URL.to_string());
     for entry in config.notify.clone() {
-        tokio::spawn(notify::notify_loop(
-            client.clone(),
-            state.clone(),
-            entry,
-            ntfy_base.clone(),
-        ));
+        // VARDE_NTFY_BASE_URL / VARDE_TELEGRAM_BASE_URL are test seams (see README);
+        // the config schema stays legacy-compatible.
+        let env_var = match entry {
+            config::NotifyConfig::Ntfy { .. } => "VARDE_NTFY_BASE_URL",
+            config::NotifyConfig::Telegram { .. } => "VARDE_TELEGRAM_BASE_URL",
+        };
+        let base = notify::base_url(&entry, std::env::var(env_var).ok());
+        tokio::spawn(notify::notify_loop(client.clone(), state.clone(), entry, base));
     }
 
     let listener = match tokio::net::TcpListener::bind(("0.0.0.0", port)).await {

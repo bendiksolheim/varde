@@ -2,7 +2,7 @@
 
 An intentionally minimal uptime monitor used to keep track of the current status of your services and tell you
 when they don’t work as expected. Works by pinging configured services on a schedule and keeping track of the current
-status. Reports to healthchecks.io and optionally notifies you directly via https://ntfy.sh.
+status. Reports to healthchecks.io and optionally notifies you directly via https://ntfy.sh or Telegram.
 
 Varde features no GUI, only an endpoint serving the current status as JSON.
 
@@ -15,8 +15,8 @@ Intentionally minimal feature set. Prioritizes a low resource footprint over fea
 - **Reports upstream via a heartbeat** (dead man's switch): if *everything* is up, it
   pings [healthchecks.io](https://healthchecks.io): if anything is down — or the monitor
   itself has died — the ping goes missing and healthchecks.io raises the alarm.
-- **Sends push notifications via [ntfy.sh](https://ntfy.sh)**: a rate-limited reminder
-  while an outage lasts, one "all back up" message on recovery.
+- **Sends push notifications via [ntfy.sh](https://ntfy.sh) or Telegram**: a rate-limited
+  reminder while an outage lasts, one "all back up" message on recovery.
 - **Reports the current status over HTTP**: `GET /`, returning status as JSON. No web UI.
 
 ## Installation
@@ -63,7 +63,15 @@ Example config file:
   },
   "notify": [
     {
+      "type": "ntfy",
       "topic": "my-ntfy-topic",
+      "schedule": "Every 10 minutes",
+      "minutesBetween": 120
+    },
+    {
+      "type": "telegram",
+      "botToken": "123456:my-bot-token",
+      "chatId": "987654321",
       "schedule": "Every 10 minutes",
       "minutesBetween": 120
     }
@@ -77,7 +85,7 @@ Example config file:
 |---|---|---|---|
 | `services` | Object | Yes | Contains a list of services to ping |
 | `heartbeat` | Object | No | Optional. `type` must be `"healthchecks.io"` as this is the only supported service for now |
-| `notify` | Object | No | Optional. Uses `ntfy.sh` to notify you on status changes |
+| `notify` | Object | No | Optional. A list of notification targets; each entry's `type` selects `ntfy` or `telegram` |
 
 #### Services
 
@@ -102,13 +110,27 @@ Supports sending a heartbeat to healthchecks.io.
 
 #### Notifications
 
-Supports sending notifications via ntfy.sh.
+Each entry in `notify` is one target. `type` picks the backend and, like `heartbeat`,
+determines which other fields are required.
 
-| Field | Type | Required | Descriptions |
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `type` | Enum (String) | Yes | The notification backend: `"ntfy"` or `"telegram"` |
+| `schedule` | String | Yes | How often the status should be checked to consider sending a notification. See #schedules for format |
+| `minutesBetween` | Number | Yes | In case a service is down over a prolonged amount of time, how long should we wait before sending a repeat message? |
+
+##### `type: "ntfy"`
+
+| Field | Type | Required | Description |
 |---|---|---|---|
 | `topic` | String | Yes | Your ntfy.sh topic |
-| `schedule` | String | Yes | How often the status should be checked to consider sending a notification. See #schedules for format |
-| `minutesBetween` | Number | Yes | In case a service is down over a prolonged amount of time, how long should we wait before sendint a repeat message? |
+
+##### `type: "telegram"`
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `botToken` | String | Yes | Your Telegram bot token, from [@BotFather](https://t.me/BotFather) |
+| `chatId` | String | Yes | The chat ID to send messages to |
 
 ## Schedules
 
@@ -183,6 +205,7 @@ CI enforces `cargo fmt`, `clippy -D warnings`, 100% line-coverage, and a Docker
 smoke test. `src/main.rs` excluded from unit coverage and exercised by
 `tests/e2e.rs` instead (spawns the real binary against mock upstreams).
 
-For tests, `VARDE_HC_BASE_URL` and `VARDE_NTFY_BASE_URL` override the heartbeat and ntfy
-base URLs (defaults: `https://hc-ping.com` / `https://httpbin.org` per heartbeat type,
-and `https://ntfy.sh`). The config file format stays legacy-compatible.
+For tests, `VARDE_HC_BASE_URL`, `VARDE_NTFY_BASE_URL` and `VARDE_TELEGRAM_BASE_URL`
+override the heartbeat and notify base URLs (defaults: `https://hc-ping.com` /
+`https://httpbin.org` per heartbeat type, and `https://ntfy.sh` / `https://api.telegram.org`
+per notify type). The config file format stays legacy-compatible.

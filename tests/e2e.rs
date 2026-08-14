@@ -149,6 +149,7 @@ async fn binary_heartbeats_and_notifies_through_an_outage() {
                 "schedule": "every 1 seconds"
             },
             "notify": [{
+                "type": "ntfy",
                 "topic": "e2e-topic",
                 "schedule": "every 1 seconds",
                 "minutesBetween": 120

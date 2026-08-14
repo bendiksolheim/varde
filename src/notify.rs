@@ -1,6 +1,7 @@
-//! Ntfy notifications (spec §2.5–§2.6): rate-limited down messages while an outage
-//! lasts, one recovery message when it ends. This is a redesign of the legacy behavior
-//! (recovery messages are new; state updates only on successful send; 2xx required).
+//! Notifications (spec §2.5–§2.6) over ntfy.sh or Telegram: rate-limited down messages
+//! while an outage lasts, one recovery message when it ends. This is a redesign of the
+//! legacy behavior (recovery messages are new; state updates only on successful send;
+//! 2xx required).
 
 use std::sync::Arc;
 
@@ -11,6 +12,27 @@ use crate::schedule;
 use crate::state::{AppState, ServiceStatus};
 
 pub const DEFAULT_NTFY_BASE_URL: &str = "https://ntfy.sh";
+pub const DEFAULT_TELEGRAM_BASE_URL: &str = "https://api.telegram.org";
+
+/// Default send base for the configured type, overridable via `env_override` (test
+/// seam; the config schema stays legacy-compatible).
+pub fn base_url(entry: &NotifyConfig, env_override: Option<String>) -> String {
+    env_override.unwrap_or_else(|| {
+        match entry {
+            NotifyConfig::Ntfy { .. } => DEFAULT_NTFY_BASE_URL,
+            NotifyConfig::Telegram { .. } => DEFAULT_TELEGRAM_BASE_URL,
+        }
+        .to_string()
+    })
+}
+
+/// Log-correlation identifier: the ntfy topic, or the Telegram chat id.
+fn recipient(entry: &NotifyConfig) -> &str {
+    match entry {
+        NotifyConfig::Ntfy { topic, .. } => topic,
+        NotifyConfig::Telegram { chat_id, .. } => chat_id,
+    }
+}
 
 /// Per-entry state (spec §2.5): two topics never share a rate-limit window.
 #[derive(Debug, Default, Clone, PartialEq)]
@@ -74,14 +96,14 @@ pub async fn notify_tick(
         if post(
             client,
             base_url,
-            &entry.topic,
+            entry,
             "Services recovered",
             "white_check_mark",
             "All services back up".to_string(),
         )
         .await
         {
-            tracing::info!(topic = entry.topic, "recovery notification sent");
+            tracing::info!(recipient = recipient(entry), "recovery notification sent");
             state.was_down = false;
             state.last_sent = None;
             return NotifyOutcome::Recovered;
@@ -95,31 +117,41 @@ pub async fn notify_tick(
     let due = match state.last_sent {
         None => true,
         // Strictly greater, in fractional minutes — inherited from legacy (spec §2.5).
-        Some(sent_at) => now.duration_since(sent_at).as_secs_f64() / 60.0 > entry.minutes_between,
+        Some(sent_at) => {
+            now.duration_since(sent_at).as_secs_f64() / 60.0 > entry.minutes_between()
+        }
     };
     if !due {
-        tracing::debug!(topic = entry.topic, "notification rate-limited");
+        tracing::debug!(recipient = recipient(entry), "notification rate-limited");
         return NotifyOutcome::RateLimited;
     }
-    if post(
-        client,
-        base_url,
-        &entry.topic,
-        "Service down",
-        "warning",
-        body,
-    )
-    .await
-    {
-        tracing::info!(topic = entry.topic, "down notification sent");
+    if post(client, base_url, entry, "Service down", "warning", body).await {
+        tracing::info!(recipient = recipient(entry), "down notification sent");
         state.last_sent = Some(now);
         return NotifyOutcome::SentDown;
     }
     NotifyOutcome::SendFailed
 }
 
-/// A send succeeds iff the POST completes with 2xx (spec §2.5.5).
+/// A send succeeds iff the POST completes with 2xx (spec §2.5.5). Dispatches to the
+/// transport for the entry's configured type.
 async fn post(
+    client: &reqwest::Client,
+    base_url: &str,
+    entry: &NotifyConfig,
+    title: &str,
+    tags: &str,
+    body: String,
+) -> bool {
+    match entry {
+        NotifyConfig::Ntfy { topic, .. } => post_ntfy(client, base_url, topic, title, tags, body).await,
+        NotifyConfig::Telegram {
+            bot_token, chat_id, ..
+        } => post_telegram(client, base_url, bot_token, chat_id, title, body).await,
+    }
+}
+
+async fn post_ntfy(
     client: &reqwest::Client,
     base_url: &str,
     topic: &str,
@@ -147,6 +179,32 @@ async fn post(
     }
 }
 
+async fn post_telegram(
+    client: &reqwest::Client,
+    base_url: &str,
+    bot_token: &str,
+    chat_id: &str,
+    title: &str,
+    body: String,
+) -> bool {
+    let result = client
+        .post(format!("{base_url}/bot{bot_token}/sendMessage"))
+        .json(&serde_json::json!({ "chat_id": chat_id, "text": format!("{title}\n\n{body}") }))
+        .send()
+        .await;
+    match result {
+        Ok(response) if response.status().is_success() => true,
+        Ok(response) => {
+            tracing::warn!(chat_id, status = %response.status(), "telegram answered non-2xx");
+            false
+        }
+        Err(e) => {
+            tracing::warn!(chat_id, error = %e, "telegram send failed");
+            false
+        }
+    }
+}
+
 /// First tick at the first scheduled occurrence (spec §2.8); state lives here, one
 /// instance per notify entry.
 pub async fn notify_loop(
@@ -157,7 +215,7 @@ pub async fn notify_loop(
 ) {
     let mut state = NotifyState::default();
     loop {
-        schedule::sleep_until_next(&entry.schedule).await;
+        schedule::sleep_until_next(entry.schedule()).await;
         let now = Timestamp::now();
         notify_tick(&client, &app.snapshot(), &entry, &mut state, now, &base_url).await;
     }
@@ -171,7 +229,19 @@ mod tests {
 
     fn entry_with(minutes_between: f64) -> NotifyConfig {
         serde_json::from_value(serde_json::json!({
+            "type": "ntfy",
             "topic": "my-topic",
+            "schedule": "every 1 minute",
+            "minutesBetween": minutes_between
+        }))
+        .unwrap()
+    }
+
+    fn telegram_entry_with(minutes_between: f64) -> NotifyConfig {
+        serde_json::from_value(serde_json::json!({
+            "type": "telegram",
+            "botToken": "123456:abc-def",
+            "chatId": "my-chat",
             "schedule": "every 1 minute",
             "minutesBetween": minutes_between
         }))
@@ -224,6 +294,24 @@ mod tests {
             .expect(count)
             .mount(server)
             .await;
+    }
+
+    async fn expect_telegram_post(server: &MockServer, text: &str, count: u64) {
+        Mock::given(method("POST"))
+            .and(path("/bot123456:abc-def/sendMessage"))
+            .and(body_string(
+                serde_json::json!({ "chat_id": "my-chat", "text": text }).to_string(),
+            ))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(count)
+            .mount(server)
+            .await;
+    }
+
+    #[test]
+    fn recipient_reports_ntfy_topic_or_telegram_chat_id() {
+        assert_eq!(recipient(&entry_with(5.0)), "my-topic");
+        assert_eq!(recipient(&telegram_entry_with(5.0)), "my-chat");
     }
 
     #[test]
@@ -482,7 +570,7 @@ mod tests {
             .await;
         let entry_a = entry_with(120.0);
         let entry_b: NotifyConfig = serde_json::from_value(serde_json::json!({
-            "topic": "other-topic", "schedule": "every 1 minute", "minutesBetween": 120
+            "type": "ntfy", "topic": "other-topic", "schedule": "every 1 minute", "minutesBetween": 120
         }))
         .unwrap();
         let down = snap(&[("a", Some(false))]);
@@ -542,7 +630,7 @@ mod tests {
             },
         );
         let entry: NotifyConfig = serde_json::from_value(serde_json::json!({
-            "topic": "my-topic", "schedule": "every 1 second", "minutesBetween": 120
+            "type": "ntfy", "topic": "my-topic", "schedule": "every 1 second", "minutesBetween": 120
         }))
         .unwrap();
         let handle = tokio::spawn(notify_loop(client(), app, entry, server.uri()));
@@ -552,5 +640,105 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(2200)).await;
         handle.abort();
         server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn telegram_down_sends_json_body_and_updates_state() {
+        let server = MockServer::start().await;
+        expect_telegram_post(&server, "Service down\n\n1 service down: b", 1).await;
+        let mut state = NotifyState::default();
+        let now = ts("2026-07-18T12:00:00Z");
+        let outcome = notify_tick(
+            &client(),
+            &snap(&[("a", Some(true)), ("b", Some(false))]),
+            &telegram_entry_with(120.0),
+            &mut state,
+            now,
+            &server.uri(),
+        )
+        .await;
+        assert_eq!(outcome, NotifyOutcome::SentDown);
+        assert_eq!(state.last_sent, Some(now));
+        assert!(state.was_down);
+        server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn telegram_recovery_flow() {
+        let server = MockServer::start().await;
+        expect_telegram_post(&server, "Service down\n\n1 service down: a", 1).await;
+        expect_telegram_post(&server, "Services recovered\n\nAll services back up", 1).await;
+        let entry = telegram_entry_with(120.0);
+        let down = snap(&[("a", Some(false))]);
+        let up = snap(&[("a", Some(true))]);
+        let mut state = NotifyState::default();
+        let c = client();
+
+        let t0 = ts("2026-07-18T12:00:00Z");
+        assert_eq!(
+            notify_tick(&c, &down, &entry, &mut state, t0, &server.uri()).await,
+            NotifyOutcome::SentDown
+        );
+        let t1 = ts("2026-07-18T12:01:00Z");
+        assert_eq!(
+            notify_tick(&c, &up, &entry, &mut state, t1, &server.uri()).await,
+            NotifyOutcome::Recovered
+        );
+        server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn telegram_non_2xx_counts_as_failure() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(500))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let mut state = NotifyState::default();
+        let outcome = notify_tick(
+            &client(),
+            &snap(&[("a", Some(false))]),
+            &telegram_entry_with(120.0),
+            &mut state,
+            ts("2026-07-18T12:00:00Z"),
+            &server.uri(),
+        )
+        .await;
+        assert_eq!(outcome, NotifyOutcome::SendFailed);
+        assert_eq!(state.last_sent, None);
+        server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn telegram_transport_failure_counts_as_failed_send() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let unbound = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+        drop(listener);
+        let mut state = NotifyState::default();
+        let outcome = notify_tick(
+            &client(),
+            &snap(&[("a", Some(false))]),
+            &telegram_entry_with(0.0),
+            &mut state,
+            ts("2026-07-18T12:00:00Z"),
+            &unbound,
+        )
+        .await;
+        assert_eq!(outcome, NotifyOutcome::SendFailed);
+        assert_eq!(state.last_sent, None);
+    }
+
+    #[test]
+    fn base_url_resolution() {
+        assert_eq!(base_url(&entry_with(1.0), None), DEFAULT_NTFY_BASE_URL);
+        assert_eq!(
+            base_url(&telegram_entry_with(1.0), None),
+            DEFAULT_TELEGRAM_BASE_URL
+        );
+        assert_eq!(
+            base_url(&entry_with(1.0), Some("http://mock".into())),
+            "http://mock"
+        );
     }
 }

@@ -20,9 +20,17 @@
   },
   "notify": [
     {
+      "type": "ntfy",
       "topic": "my-ntfy-topic",
       "schedule": "Every 10 minutes",
       "minutesBetween": 120
+    },
+    {
+      "type": "telegram",
+      "botToken": "123456:abc-def",
+      "chatId": "987654",
+      "schedule": "Every 10 minutes",
+      "minutesBetween": 60
     }
   ]
 }
