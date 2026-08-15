@@ -55,41 +55,49 @@ impl HeartbeatConfig {
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NtfyEntry {
+    pub topic: String,
+    pub schedule: Schedule,
+    #[serde(rename = "minutesBetween")]
+    pub minutes_between: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TelegramEntry {
+    #[serde(rename = "botToken")]
+    pub bot_token: String,
+    #[serde(rename = "chatId")]
+    pub chat_id: String,
+    pub schedule: Schedule,
+    #[serde(rename = "minutesBetween")]
+    pub minutes_between: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PushoverEntry {
+    #[serde(rename = "apiToken")]
+    pub api_token: String,
+    #[serde(rename = "userKey")]
+    pub user_key: String,
+    #[serde(default)]
+    pub priority: Option<i8>,
+    pub schedule: Schedule,
+    #[serde(rename = "minutesBetween")]
+    pub minutes_between: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(tag = "type", deny_unknown_fields)]
 pub enum NotifyConfig {
     #[serde(rename = "ntfy")]
-    Ntfy {
-        topic: String,
-        schedule: Schedule,
-        #[serde(rename = "minutesBetween")]
-        minutes_between: f64,
-    },
+    Ntfy(NtfyEntry),
     #[serde(rename = "telegram")]
-    Telegram {
-        #[serde(rename = "botToken")]
-        bot_token: String,
-        #[serde(rename = "chatId")]
-        chat_id: String,
-        schedule: Schedule,
-        #[serde(rename = "minutesBetween")]
-        minutes_between: f64,
-    },
-}
-
-impl NotifyConfig {
-    pub fn schedule(&self) -> &Schedule {
-        match self {
-            Self::Ntfy { schedule, .. } | Self::Telegram { schedule, .. } => schedule,
-        }
-    }
-
-    pub fn minutes_between(&self) -> f64 {
-        match self {
-            Self::Ntfy { minutes_between, .. } | Self::Telegram { minutes_between, .. } => {
-                *minutes_between
-            }
-        }
-    }
+    Telegram(TelegramEntry),
+    #[serde(rename = "pushover")]
+    Pushover(PushoverEntry),
 }
 
 #[derive(Debug)]
@@ -143,10 +151,9 @@ impl fmt::Display for ConfigError {
                 "service \"{service}\" has okStatusCode {code} outside 1..=599"
             ),
             Self::EmptyUuid => write!(f, "heartbeat uuid must not be empty"),
-            Self::NegativeMinutesBetween { index, value } => write!(
-                f,
-                "notify[{index}] has negative minutesBetween {value}"
-            ),
+            Self::NegativeMinutesBetween { index, value } => {
+                write!(f, "notify[{index}] has negative minutesBetween {value}")
+            }
         }
     }
 }
@@ -269,27 +276,39 @@ mod tests {
                 schedule: crate::schedule::parse("Every 10 minutes").unwrap()
             })
         );
-        assert_eq!(config.notify.len(), 2);
+        assert_eq!(config.notify.len(), 3);
         assert_eq!(
             config.notify[0],
-            NotifyConfig::Ntfy {
+            NotifyConfig::Ntfy(NtfyEntry {
                 topic: "my-ntfy-topic".into(),
                 schedule: crate::schedule::parse("Every 10 minutes").unwrap(),
                 minutes_between: 120.0,
-            }
+            })
         );
         assert_eq!(config.notify[0].schedule().to_string(), "Every 10 minutes");
         assert_eq!(config.notify[0].minutes_between(), 120.0);
         assert_eq!(
             config.notify[1],
-            NotifyConfig::Telegram {
+            NotifyConfig::Telegram(TelegramEntry {
                 bot_token: "123456:abc-def".into(),
                 chat_id: "987654".into(),
                 schedule: crate::schedule::parse("Every 10 minutes").unwrap(),
                 minutes_between: 60.0,
-            }
+            })
         );
         assert_eq!(config.notify[1].schedule().to_string(), "Every 10 minutes");
+        assert_eq!(
+            config.notify[2],
+            NotifyConfig::Pushover(PushoverEntry {
+                api_token: "my-pushover-token".into(),
+                user_key: "my-pushover-user".into(),
+                priority: None,
+                schedule: crate::schedule::parse("Every 10 minutes").unwrap(),
+                minutes_between: 30.0,
+            })
+        );
+        assert_eq!(config.notify[2].schedule().to_string(), "Every 10 minutes");
+        assert_eq!(config.notify[2].minutes_between(), 30.0);
     }
 
     #[test]
@@ -492,12 +511,51 @@ mod tests {
         let config = load_str(json).unwrap();
         assert_eq!(
             config.notify[0],
-            NotifyConfig::Telegram {
+            NotifyConfig::Telegram(TelegramEntry {
                 bot_token: "123:abc".into(),
                 chat_id: "42".into(),
                 schedule: crate::schedule::parse("every 1 minute").unwrap(),
                 minutes_between: 5.0,
-            }
+            })
+        );
+    }
+
+    #[test]
+    fn pushover_notify_variant_parses() {
+        let json = r#"{"services": [], "notify": [
+            {"type": "pushover", "apiToken": "app-tok", "userKey": "user-key",
+             "priority": 1, "schedule": "every 1 minute", "minutesBetween": 5}
+        ]}"#;
+        let config = load_str(json).unwrap();
+        assert_eq!(
+            config.notify[0],
+            NotifyConfig::Pushover(PushoverEntry {
+                api_token: "app-tok".into(),
+                user_key: "user-key".into(),
+                priority: Some(1),
+                schedule: crate::schedule::parse("every 1 minute").unwrap(),
+                minutes_between: 5.0,
+            })
+        );
+    }
+
+    #[test]
+    fn pushover_notify_variant_parses_without_priority() {
+        // Priority omitted entirely — must default to None, not error.
+        let json = r#"{"services": [], "notify": [
+            {"type": "pushover", "apiToken": "app-tok", "userKey": "user-key",
+             "schedule": "every 1 minute", "minutesBetween": 5}
+        ]}"#;
+        let config = load_str(json).unwrap();
+        assert_eq!(
+            config.notify[0],
+            NotifyConfig::Pushover(PushoverEntry {
+                api_token: "app-tok".into(),
+                user_key: "user-key".into(),
+                priority: None,
+                schedule: crate::schedule::parse("every 1 minute").unwrap(),
+                minutes_between: 5.0,
+            })
         );
     }
 
@@ -516,6 +574,18 @@ mod tests {
         // it instead of silently ignoring it.
         let json = r#"{"services": [], "notify": [
             {"type": "telegram", "botToken": "123:abc", "chatId": "42", "topic": "t",
+             "schedule": "every 1 minute", "minutesBetween": 1}
+        ]}"#;
+        let err = load_str(json).unwrap_err();
+        assert!(err.to_string().contains("topic"), "got: {err}");
+    }
+
+    #[test]
+    fn pushover_with_stray_topic_rejected() {
+        // `topic` isn't a field of the pushover variant — deny_unknown_fields rejects
+        // it instead of silently ignoring it.
+        let json = r#"{"services": [], "notify": [
+            {"type": "pushover", "apiToken": "app-tok", "userKey": "user-key", "topic": "t",
              "schedule": "every 1 minute", "minutesBetween": 1}
         ]}"#;
         let err = load_str(json).unwrap_err();

@@ -2,7 +2,7 @@
 
 An intentionally minimal uptime monitor used to keep track of the current status of your services and tell you
 when they don’t work as expected. Works by pinging configured services on a schedule and keeping track of the current
-status. Reports to healthchecks.io and optionally notifies you directly via https://ntfy.sh or Telegram.
+status. Reports to healthchecks.io and optionally notifies you directly via https://ntfy.sh, Telegram, or Pushover.
 
 Varde features no GUI, only an endpoint serving the current status as JSON.
 
@@ -15,8 +15,8 @@ Intentionally minimal feature set. Prioritizes a low resource footprint over fea
 - **Reports upstream via a heartbeat** (dead man's switch): if *everything* is up, it
   pings [healthchecks.io](https://healthchecks.io): if anything is down — or the monitor
   itself has died — the ping goes missing and healthchecks.io raises the alarm.
-- **Sends push notifications via [ntfy.sh](https://ntfy.sh) or Telegram**: a rate-limited
-  reminder while an outage lasts, one "all back up" message on recovery.
+- **Sends push notifications via [ntfy.sh](https://ntfy.sh), Telegram, or [Pushover](https://pushover.net)**:
+  a rate-limited reminder while an outage lasts, one "all back up" message on recovery.
 - **Reports the current status over HTTP**: `GET /`, returning status as JSON. No web UI.
 
 ## Installation
@@ -74,6 +74,14 @@ Example config file:
       "chatId": "987654321",
       "schedule": "Every 10 minutes",
       "minutesBetween": 120
+    },
+    {
+      "type": "pushover",
+      "apiToken": "my-pushover-api-token",
+      "userKey": "my-pushover-user-key",
+      "priority": 1,
+      "schedule": "Every 10 minutes",
+      "minutesBetween": 120
     }
   ]
 }
@@ -85,7 +93,7 @@ Example config file:
 |---|---|---|---|
 | `services` | Object | Yes | Contains a list of services to ping |
 | `heartbeat` | Object | No | Optional. `type` must be `"healthchecks.io"` as this is the only supported service for now |
-| `notify` | Object | No | Optional. A list of notification targets; each entry's `type` selects `ntfy` or `telegram` |
+| `notify` | Object | No | Optional. A list of notification targets; each entry's `type` selects `ntfy`, `telegram`, or `pushover` |
 
 #### Services
 
@@ -115,7 +123,7 @@ determines which other fields are required.
 
 | Field | Type | Required | Description |
 |---|---|---|---|
-| `type` | Enum (String) | Yes | The notification backend: `"ntfy"` or `"telegram"` |
+| `type` | Enum (String) | Yes | The notification backend: `"ntfy"`, `"telegram"`, or `"pushover"` |
 | `schedule` | String | Yes | How often the status should be checked to consider sending a notification. See #schedules for format |
 | `minutesBetween` | Number | Yes | In case a service is down over a prolonged amount of time, how long should we wait before sending a repeat message? |
 
@@ -131,6 +139,29 @@ determines which other fields are required.
 |---|---|---|---|
 | `botToken` | String | Yes | Your Telegram bot token, from [@BotFather](https://t.me/BotFather) |
 | `chatId` | String | Yes | The chat ID to send messages to |
+
+##### `type: "pushover"`
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `apiToken` | String | Yes | Your Pushover application's API token |
+| `userKey` | String | Yes | Your Pushover user (or group) key |
+| `priority` | Number | No | Message priority, `-2` (lowest) to `1` (high); omitted means Pushover's own default (`0`, normal). Emergency priority (`2`) is not supported |
+
+## Testing notifications
+
+Run varde with the flag `test-notify [--only {service}]` to test notifications
+
+```sh
+varde test-notify              # every configured entry
+varde test-notify --only pushover
+```
+
+If you run Varde in a Docker container, use `docker exec`:
+
+```sh
+docker exec <container> /varde test-notify
+```
 
 ## Schedules
 
@@ -205,7 +236,8 @@ CI enforces `cargo fmt`, `clippy -D warnings`, 100% line-coverage, and a Docker
 smoke test. `src/main.rs` excluded from unit coverage and exercised by
 `tests/e2e.rs` instead (spawns the real binary against mock upstreams).
 
-For tests, `VARDE_HC_BASE_URL`, `VARDE_NTFY_BASE_URL` and `VARDE_TELEGRAM_BASE_URL`
-override the heartbeat and notify base URLs (defaults: `https://hc-ping.com` /
-`https://httpbin.org` per heartbeat type, and `https://ntfy.sh` / `https://api.telegram.org`
-per notify type). The config file format stays legacy-compatible.
+For tests, `VARDE_HC_BASE_URL`, `VARDE_NTFY_BASE_URL`, `VARDE_TELEGRAM_BASE_URL` and
+`VARDE_PUSHOVER_BASE_URL` override the heartbeat and notify base URLs (defaults:
+`https://hc-ping.com` / `https://httpbin.org` per heartbeat type, and `https://ntfy.sh` /
+`https://api.telegram.org` / `https://api.pushover.net` per notify type). The config file
+format stays legacy-compatible.

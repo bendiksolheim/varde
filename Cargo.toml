@@ -3,10 +3,11 @@ name = "varde"
 version = "0.1.0"
 edition = "2024"
 license = "ISC"
-description = "Minimal uptime monitor: HTTP checks, dead man's switch heartbeat, ntfy/Telegram notifications"
+description = "Minimal uptime monitor: HTTP checks, dead man's switch heartbeat, ntfy/Telegram/Pushover notifications"
 repository = "https://github.com/bendiksolheim/varde"
 
 [dependencies]
+async-trait = "0.1"
 axum = "0.8"
 jiff = "0.2"
 # 0.12 pinned deliberately: 0.13 dropped rustls-tls-webpki-roots (defaults to aws-lc-rs +

@@ -1,37 +1,244 @@
-//! Notifications (spec §2.5–§2.6) over ntfy.sh or Telegram: rate-limited down messages
-//! while an outage lasts, one recovery message when it ends. This is a redesign of the
-//! legacy behavior (recovery messages are new; state updates only on successful send;
-//! 2xx required).
+//! Notifications (spec §2.5–§2.6) over ntfy.sh, Telegram, or Pushover: rate-limited down
+//! messages while an outage lasts, one recovery message when it ends. This is a redesign
+//! of the legacy behavior (recovery messages are new; state updates only on successful
+//! send; 2xx required).
 
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use jiff::Timestamp;
 
-use crate::config::NotifyConfig;
-use crate::schedule;
+use crate::config::{NotifyConfig, NtfyEntry, PushoverEntry, TelegramEntry};
+use crate::schedule::{self, Schedule};
 use crate::state::{AppState, ServiceStatus};
 
 pub const DEFAULT_NTFY_BASE_URL: &str = "https://ntfy.sh";
 pub const DEFAULT_TELEGRAM_BASE_URL: &str = "https://api.telegram.org";
+pub const DEFAULT_PUSHOVER_BASE_URL: &str = "https://api.pushover.net";
+
+/// One notification backend's behavior. Implementing this for a new struct, plus adding
+/// one arm to `NotifyConfig::backend()` below, is the only place a new backend needs to
+/// touch beyond its own struct definition and enum variant.
+#[async_trait]
+pub trait NotifyBackend: Send + Sync {
+    fn schedule(&self) -> &Schedule;
+    fn minutes_between(&self) -> f64;
+    fn default_base_url(&self) -> &'static str;
+    fn env_var(&self) -> &'static str;
+    /// Log-correlation identifier: topic, chat id, user key, etc.
+    fn recipient(&self) -> &str;
+    async fn send(
+        &self,
+        client: &reqwest::Client,
+        base_url: &str,
+        title: &str,
+        tags: &str,
+        body: String,
+    ) -> bool;
+}
+
+impl NotifyConfig {
+    fn backend(&self) -> &dyn NotifyBackend {
+        match self {
+            Self::Ntfy(e) => e,
+            Self::Telegram(e) => e,
+            Self::Pushover(e) => e,
+        }
+    }
+
+    pub fn schedule(&self) -> &Schedule {
+        self.backend().schedule()
+    }
+
+    pub fn minutes_between(&self) -> f64 {
+        self.backend().minutes_between()
+    }
+
+    /// The `type` discriminant, e.g. `"pushover"` (used to label `test-notify` output).
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::Ntfy(_) => "ntfy",
+            Self::Telegram(_) => "telegram",
+            Self::Pushover(_) => "pushover",
+        }
+    }
+}
+
+#[async_trait]
+impl NotifyBackend for NtfyEntry {
+    fn schedule(&self) -> &Schedule {
+        &self.schedule
+    }
+    fn minutes_between(&self) -> f64 {
+        self.minutes_between
+    }
+    fn default_base_url(&self) -> &'static str {
+        DEFAULT_NTFY_BASE_URL
+    }
+    fn env_var(&self) -> &'static str {
+        "VARDE_NTFY_BASE_URL"
+    }
+    fn recipient(&self) -> &str {
+        &self.topic
+    }
+
+    async fn send(
+        &self,
+        client: &reqwest::Client,
+        base_url: &str,
+        title: &str,
+        tags: &str,
+        body: String,
+    ) -> bool {
+        let result = client
+            .post(format!("{base_url}/{}", self.topic))
+            .header("Title", title)
+            .header("Tags", tags)
+            .body(body)
+            .send()
+            .await;
+        match result {
+            Ok(response) if response.status().is_success() => true,
+            Ok(response) => {
+                tracing::warn!(topic = %self.topic, status = %response.status(), "ntfy answered non-2xx");
+                false
+            }
+            Err(e) => {
+                tracing::warn!(topic = %self.topic, error = %e, "ntfy send failed");
+                false
+            }
+        }
+    }
+}
+
+#[async_trait]
+impl NotifyBackend for TelegramEntry {
+    fn schedule(&self) -> &Schedule {
+        &self.schedule
+    }
+    fn minutes_between(&self) -> f64 {
+        self.minutes_between
+    }
+    fn default_base_url(&self) -> &'static str {
+        DEFAULT_TELEGRAM_BASE_URL
+    }
+    fn env_var(&self) -> &'static str {
+        "VARDE_TELEGRAM_BASE_URL"
+    }
+    fn recipient(&self) -> &str {
+        &self.chat_id
+    }
+
+    async fn send(
+        &self,
+        client: &reqwest::Client,
+        base_url: &str,
+        title: &str,
+        _tags: &str,
+        body: String,
+    ) -> bool {
+        let result = client
+            .post(format!("{base_url}/bot{}/sendMessage", self.bot_token))
+            .json(&serde_json::json!({ "chat_id": self.chat_id, "text": format!("{title}\n\n{body}") }))
+            .send()
+            .await;
+        match result {
+            Ok(response) if response.status().is_success() => true,
+            Ok(response) => {
+                tracing::warn!(chat_id = %self.chat_id, status = %response.status(), "telegram answered non-2xx");
+                false
+            }
+            Err(e) => {
+                tracing::warn!(chat_id = %self.chat_id, error = %e, "telegram send failed");
+                false
+            }
+        }
+    }
+}
+
+#[async_trait]
+impl NotifyBackend for PushoverEntry {
+    fn schedule(&self) -> &Schedule {
+        &self.schedule
+    }
+    fn minutes_between(&self) -> f64 {
+        self.minutes_between
+    }
+    fn default_base_url(&self) -> &'static str {
+        DEFAULT_PUSHOVER_BASE_URL
+    }
+    fn env_var(&self) -> &'static str {
+        "VARDE_PUSHOVER_BASE_URL"
+    }
+    fn recipient(&self) -> &str {
+        &self.user_key
+    }
+
+    async fn send(
+        &self,
+        client: &reqwest::Client,
+        base_url: &str,
+        title: &str,
+        _tags: &str,
+        body: String,
+    ) -> bool {
+        let mut form: Vec<(&str, String)> = vec![
+            ("token", self.api_token.clone()),
+            ("user", self.user_key.clone()),
+            ("title", title.to_string()),
+            ("message", body),
+        ];
+        if let Some(priority) = self.priority {
+            form.push(("priority", priority.to_string()));
+        }
+        let result = client
+            .post(format!("{base_url}/1/messages.json"))
+            .form(&form)
+            .send()
+            .await;
+        match result {
+            Ok(response) if response.status().is_success() => true,
+            Ok(response) => {
+                tracing::warn!(user_key = %self.user_key, status = %response.status(), "pushover answered non-2xx");
+                false
+            }
+            Err(e) => {
+                tracing::warn!(user_key = %self.user_key, error = %e, "pushover send failed");
+                false
+            }
+        }
+    }
+}
 
 /// Default send base for the configured type, overridable via `env_override` (test
 /// seam; the config schema stays legacy-compatible).
 pub fn base_url(entry: &NotifyConfig, env_override: Option<String>) -> String {
-    env_override.unwrap_or_else(|| {
-        match entry {
-            NotifyConfig::Ntfy { .. } => DEFAULT_NTFY_BASE_URL,
-            NotifyConfig::Telegram { .. } => DEFAULT_TELEGRAM_BASE_URL,
-        }
-        .to_string()
-    })
+    env_override.unwrap_or_else(|| entry.backend().default_base_url().to_string())
 }
 
-/// Log-correlation identifier: the ntfy topic, or the Telegram chat id.
-fn recipient(entry: &NotifyConfig) -> &str {
-    match entry {
-        NotifyConfig::Ntfy { topic, .. } => topic,
-        NotifyConfig::Telegram { chat_id, .. } => chat_id,
-    }
+/// Env var name used as a test seam to override this entry's base URL.
+pub fn env_var(entry: &NotifyConfig) -> &'static str {
+    entry.backend().env_var()
+}
+
+/// Log-correlation identifier: the ntfy topic, Telegram chat id, or Pushover user key.
+pub fn recipient(entry: &NotifyConfig) -> &str {
+    entry.backend().recipient()
+}
+
+/// One-shot manual send (`test-notify`), bypassing the rate-limit/outage state machine
+/// entirely: always sends, regardless of whether anything is actually down.
+pub async fn send_test(client: &reqwest::Client, entry: &NotifyConfig, base_url: &str) -> bool {
+    entry
+        .backend()
+        .send(
+            client,
+            base_url,
+            "Varde test notification",
+            "test_tube",
+            "This is a test notification, triggered manually via `varde test-notify`.".to_string(),
+        )
+        .await
 }
 
 /// Per-entry state (spec §2.5): two topics never share a rate-limit window.
@@ -93,15 +300,16 @@ pub async fn notify_tick(
         // Outage just ended. Recovery is never rate-limited (at most one per outage by
         // construction), and it resets the window: the first down-message of the next
         // outage always sends immediately (spec §2.5.3).
-        if post(
-            client,
-            base_url,
-            entry,
-            "Services recovered",
-            "white_check_mark",
-            "All services back up".to_string(),
-        )
-        .await
+        if entry
+            .backend()
+            .send(
+                client,
+                base_url,
+                "Services recovered",
+                "white_check_mark",
+                "All services back up".to_string(),
+            )
+            .await
         {
             tracing::info!(recipient = recipient(entry), "recovery notification sent");
             state.was_down = false;
@@ -117,92 +325,22 @@ pub async fn notify_tick(
     let due = match state.last_sent {
         None => true,
         // Strictly greater, in fractional minutes — inherited from legacy (spec §2.5).
-        Some(sent_at) => {
-            now.duration_since(sent_at).as_secs_f64() / 60.0 > entry.minutes_between()
-        }
+        Some(sent_at) => now.duration_since(sent_at).as_secs_f64() / 60.0 > entry.minutes_between(),
     };
     if !due {
         tracing::debug!(recipient = recipient(entry), "notification rate-limited");
         return NotifyOutcome::RateLimited;
     }
-    if post(client, base_url, entry, "Service down", "warning", body).await {
+    if entry
+        .backend()
+        .send(client, base_url, "Service down", "warning", body)
+        .await
+    {
         tracing::info!(recipient = recipient(entry), "down notification sent");
         state.last_sent = Some(now);
         return NotifyOutcome::SentDown;
     }
     NotifyOutcome::SendFailed
-}
-
-/// A send succeeds iff the POST completes with 2xx (spec §2.5.5). Dispatches to the
-/// transport for the entry's configured type.
-async fn post(
-    client: &reqwest::Client,
-    base_url: &str,
-    entry: &NotifyConfig,
-    title: &str,
-    tags: &str,
-    body: String,
-) -> bool {
-    match entry {
-        NotifyConfig::Ntfy { topic, .. } => post_ntfy(client, base_url, topic, title, tags, body).await,
-        NotifyConfig::Telegram {
-            bot_token, chat_id, ..
-        } => post_telegram(client, base_url, bot_token, chat_id, title, body).await,
-    }
-}
-
-async fn post_ntfy(
-    client: &reqwest::Client,
-    base_url: &str,
-    topic: &str,
-    title: &str,
-    tags: &str,
-    body: String,
-) -> bool {
-    let result = client
-        .post(format!("{base_url}/{topic}"))
-        .header("Title", title)
-        .header("Tags", tags)
-        .body(body)
-        .send()
-        .await;
-    match result {
-        Ok(response) if response.status().is_success() => true,
-        Ok(response) => {
-            tracing::warn!(topic, status = %response.status(), "ntfy answered non-2xx");
-            false
-        }
-        Err(e) => {
-            tracing::warn!(topic, error = %e, "ntfy send failed");
-            false
-        }
-    }
-}
-
-async fn post_telegram(
-    client: &reqwest::Client,
-    base_url: &str,
-    bot_token: &str,
-    chat_id: &str,
-    title: &str,
-    body: String,
-) -> bool {
-    let result = client
-        .post(format!("{base_url}/bot{bot_token}/sendMessage"))
-        .json(&serde_json::json!({ "chat_id": chat_id, "text": format!("{title}\n\n{body}") }))
-        .send()
-        .await;
-    match result {
-        Ok(response) if response.status().is_success() => true,
-        Ok(response) => {
-            tracing::warn!(chat_id, status = %response.status(), "telegram answered non-2xx");
-            false
-        }
-        Err(e) => {
-            tracing::warn!(chat_id, error = %e, "telegram send failed");
-            false
-        }
-    }
 }
 
 /// First tick at the first scheduled occurrence (spec §2.8); state lives here, one
@@ -246,6 +384,20 @@ mod tests {
             "minutesBetween": minutes_between
         }))
         .unwrap()
+    }
+
+    fn pushover_entry_with(minutes_between: f64, priority: Option<i8>) -> NotifyConfig {
+        let mut json = serde_json::json!({
+            "type": "pushover",
+            "apiToken": "my-api-token",
+            "userKey": "my-user-key",
+            "schedule": "every 1 minute",
+            "minutesBetween": minutes_between
+        });
+        if let Some(p) = priority {
+            json["priority"] = serde_json::json!(p);
+        }
+        serde_json::from_value(json).unwrap()
     }
 
     fn client() -> reqwest::Client {
@@ -308,10 +460,70 @@ mod tests {
             .await;
     }
 
+    async fn expect_pushover_post(
+        server: &MockServer,
+        title: &str,
+        message: &str,
+        priority: Option<i8>,
+        count: u64,
+    ) {
+        let mut body =
+            format!("token=my-api-token&user=my-user-key&title={title}&message={message}");
+        if let Some(p) = priority {
+            body.push_str(&format!("&priority={p}"));
+        }
+        Mock::given(method("POST"))
+            .and(path("/1/messages.json"))
+            .and(body_string(body))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(count)
+            .mount(server)
+            .await;
+    }
+
     #[test]
-    fn recipient_reports_ntfy_topic_or_telegram_chat_id() {
+    fn recipient_reports_topic_chat_id_or_user_key() {
         assert_eq!(recipient(&entry_with(5.0)), "my-topic");
         assert_eq!(recipient(&telegram_entry_with(5.0)), "my-chat");
+        assert_eq!(recipient(&pushover_entry_with(5.0, None)), "my-user-key");
+    }
+
+    #[test]
+    fn kind_reports_the_type_discriminant() {
+        assert_eq!(entry_with(5.0).kind(), "ntfy");
+        assert_eq!(telegram_entry_with(5.0).kind(), "telegram");
+        assert_eq!(pushover_entry_with(5.0, None).kind(), "pushover");
+    }
+
+    #[tokio::test]
+    async fn send_test_posts_regardless_of_outage_state() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/my-topic"))
+            .and(header("Title", "Varde test notification"))
+            .and(header("Tags", "test_tube"))
+            .and(body_string(
+                "This is a test notification, triggered manually via `varde test-notify`."
+                    .to_string(),
+            ))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
+        assert!(send_test(&client(), &entry_with(120.0), &server.uri()).await);
+        server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn send_test_reports_failure_on_non_2xx() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(500))
+            .expect(1)
+            .mount(&server)
+            .await;
+        assert!(!send_test(&client(), &entry_with(120.0), &server.uri()).await);
+        server.verify().await;
     }
 
     #[test]
@@ -729,6 +941,118 @@ mod tests {
         assert_eq!(state.last_sent, None);
     }
 
+    #[tokio::test]
+    async fn pushover_down_sends_form_body_with_priority_and_updates_state() {
+        let server = MockServer::start().await;
+        expect_pushover_post(&server, "Service+down", "1+service+down%3A+b", Some(1), 1).await;
+        let mut state = NotifyState::default();
+        let now = ts("2026-07-18T12:00:00Z");
+        let outcome = notify_tick(
+            &client(),
+            &snap(&[("a", Some(true)), ("b", Some(false))]),
+            &pushover_entry_with(120.0, Some(1)),
+            &mut state,
+            now,
+            &server.uri(),
+        )
+        .await;
+        assert_eq!(outcome, NotifyOutcome::SentDown);
+        assert_eq!(state.last_sent, Some(now));
+        assert!(state.was_down);
+        server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn pushover_down_omits_priority_field_when_absent() {
+        let server = MockServer::start().await;
+        expect_pushover_post(&server, "Service+down", "1+service+down%3A+a", None, 1).await;
+        let mut state = NotifyState::default();
+        let outcome = notify_tick(
+            &client(),
+            &snap(&[("a", Some(false))]),
+            &pushover_entry_with(120.0, None),
+            &mut state,
+            ts("2026-07-18T12:00:00Z"),
+            &server.uri(),
+        )
+        .await;
+        assert_eq!(outcome, NotifyOutcome::SentDown);
+        server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn pushover_recovery_flow() {
+        let server = MockServer::start().await;
+        expect_pushover_post(&server, "Service+down", "1+service+down%3A+a", None, 1).await;
+        expect_pushover_post(
+            &server,
+            "Services+recovered",
+            "All+services+back+up",
+            None,
+            1,
+        )
+        .await;
+        let entry = pushover_entry_with(120.0, None);
+        let down = snap(&[("a", Some(false))]);
+        let up = snap(&[("a", Some(true))]);
+        let mut state = NotifyState::default();
+        let c = client();
+
+        let t0 = ts("2026-07-18T12:00:00Z");
+        assert_eq!(
+            notify_tick(&c, &down, &entry, &mut state, t0, &server.uri()).await,
+            NotifyOutcome::SentDown
+        );
+        let t1 = ts("2026-07-18T12:01:00Z");
+        assert_eq!(
+            notify_tick(&c, &up, &entry, &mut state, t1, &server.uri()).await,
+            NotifyOutcome::Recovered
+        );
+        server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn pushover_non_2xx_counts_as_failure() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(500))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let mut state = NotifyState::default();
+        let outcome = notify_tick(
+            &client(),
+            &snap(&[("a", Some(false))]),
+            &pushover_entry_with(120.0, None),
+            &mut state,
+            ts("2026-07-18T12:00:00Z"),
+            &server.uri(),
+        )
+        .await;
+        assert_eq!(outcome, NotifyOutcome::SendFailed);
+        assert_eq!(state.last_sent, None);
+        server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn pushover_transport_failure_counts_as_failed_send() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let unbound = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+        drop(listener);
+        let mut state = NotifyState::default();
+        let outcome = notify_tick(
+            &client(),
+            &snap(&[("a", Some(false))]),
+            &pushover_entry_with(0.0, None),
+            &mut state,
+            ts("2026-07-18T12:00:00Z"),
+            &unbound,
+        )
+        .await;
+        assert_eq!(outcome, NotifyOutcome::SendFailed);
+        assert_eq!(state.last_sent, None);
+    }
+
     #[test]
     fn base_url_resolution() {
         assert_eq!(base_url(&entry_with(1.0), None), DEFAULT_NTFY_BASE_URL);
@@ -737,8 +1061,25 @@ mod tests {
             DEFAULT_TELEGRAM_BASE_URL
         );
         assert_eq!(
+            base_url(&pushover_entry_with(1.0, None), None),
+            DEFAULT_PUSHOVER_BASE_URL
+        );
+        assert_eq!(
             base_url(&entry_with(1.0), Some("http://mock".into())),
             "http://mock"
+        );
+    }
+
+    #[test]
+    fn env_var_resolution() {
+        assert_eq!(env_var(&entry_with(1.0)), "VARDE_NTFY_BASE_URL");
+        assert_eq!(
+            env_var(&telegram_entry_with(1.0)),
+            "VARDE_TELEGRAM_BASE_URL"
+        );
+        assert_eq!(
+            env_var(&pushover_entry_with(1.0, None)),
+            "VARDE_PUSHOVER_BASE_URL"
         );
     }
 }

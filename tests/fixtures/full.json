@@ -31,6 +31,13 @@
       "chatId": "987654",
       "schedule": "Every 10 minutes",
       "minutesBetween": 60
+    },
+    {
+      "type": "pushover",
+      "apiToken": "my-pushover-token",
+      "userKey": "my-pushover-user",
+      "schedule": "Every 10 minutes",
+      "minutesBetween": 30
     }
   ]
 }

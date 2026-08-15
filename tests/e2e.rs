@@ -257,6 +257,218 @@ async fn binary_exits_1_on_bad_config() {
 }
 
 #[tokio::test]
+async fn test_notify_sends_to_every_configured_backend_and_exits_0() {
+    let upstream = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&upstream)
+        .await;
+
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("config.json");
+    std::fs::write(
+        &config_path,
+        serde_json::json!({
+            "services": [],
+            "notify": [
+                { "type": "ntfy", "topic": "e2e-topic", "schedule": "every 1 minute", "minutesBetween": 120 },
+                { "type": "telegram", "botToken": "123456:abc", "chatId": "chat", "schedule": "every 1 minute", "minutesBetween": 120 }
+            ]
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_varde"))
+        .arg("test-notify")
+        .env("CONFIG_PATH", &config_path)
+        .env("VARDE_NTFY_BASE_URL", upstream.uri())
+        .env("VARDE_TELEGRAM_BASE_URL", upstream.uri())
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("ntfy (e2e-topic): sent"), "got: {stdout}");
+    assert!(stdout.contains("telegram (chat): sent"), "got: {stdout}");
+    let requests = upstream.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 2);
+}
+
+#[tokio::test]
+async fn test_notify_only_filters_to_a_single_backend() {
+    let upstream = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&upstream)
+        .await;
+
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("config.json");
+    std::fs::write(
+        &config_path,
+        serde_json::json!({
+            "services": [],
+            "notify": [
+                { "type": "ntfy", "topic": "e2e-topic", "schedule": "every 1 minute", "minutesBetween": 120 },
+                { "type": "telegram", "botToken": "123456:abc", "chatId": "chat", "schedule": "every 1 minute", "minutesBetween": 120 }
+            ]
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_varde"))
+        .args(["test-notify", "--only", "ntfy"])
+        .env("CONFIG_PATH", &config_path)
+        .env("VARDE_NTFY_BASE_URL", upstream.uri())
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let requests = upstream.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 1);
+}
+
+#[tokio::test]
+async fn test_notify_exits_1_when_a_send_fails() {
+    let upstream = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(500))
+        .mount(&upstream)
+        .await;
+
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("config.json");
+    std::fs::write(
+        &config_path,
+        serde_json::json!({
+            "services": [],
+            "notify": [
+                { "type": "ntfy", "topic": "e2e-topic", "schedule": "every 1 minute", "minutesBetween": 120 }
+            ]
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_varde"))
+        .arg("test-notify")
+        .env("CONFIG_PATH", &config_path)
+        .env("VARDE_NTFY_BASE_URL", upstream.uri())
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("ntfy (e2e-topic): FAILED"), "got: {stdout}");
+}
+
+#[tokio::test]
+async fn test_notify_exits_1_when_nothing_configured() {
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("config.json");
+    std::fs::write(
+        &config_path,
+        serde_json::json!({ "services": [] }).to_string(),
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_varde"))
+        .arg("test-notify")
+        .env("CONFIG_PATH", &config_path)
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("no notify entries configured"),
+        "got: {stderr}"
+    );
+}
+
+#[tokio::test]
+async fn test_notify_exits_1_when_only_filter_matches_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("config.json");
+    std::fs::write(
+        &config_path,
+        serde_json::json!({
+            "services": [],
+            "notify": [
+                { "type": "ntfy", "topic": "e2e-topic", "schedule": "every 1 minute", "minutesBetween": 120 }
+            ]
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_varde"))
+        .args(["test-notify", "--only", "pushover"])
+        .env("CONFIG_PATH", &config_path)
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("no notify entry configured with type \"pushover\""),
+        "got: {stderr}"
+    );
+}
+
+#[tokio::test]
+async fn test_notify_exits_1_on_bad_config() {
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("config.json");
+    std::fs::write(&config_path, r#"{"services": [{"service": ""}]}"#).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_varde"))
+        .arg("test-notify")
+        .env("CONFIG_PATH", &config_path)
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(!output.stderr.is_empty());
+}
+
+#[tokio::test]
+async fn test_notify_only_requires_a_value() {
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("config.json");
+    std::fs::write(
+        &config_path,
+        serde_json::json!({ "services": [] }).to_string(),
+    )
+    .unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_varde"))
+        .args(["test-notify", "--only"])
+        .env("CONFIG_PATH", &config_path)
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("--only requires a value"), "got: {stderr}");
+}
+
+#[tokio::test]
+async fn unknown_subcommand_exits_1() {
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("config.json");
+    std::fs::write(
+        &config_path,
+        serde_json::json!({ "services": [] }).to_string(),
+    )
+    .unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_varde"))
+        .arg("bogus")
+        .env("CONFIG_PATH", &config_path)
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("unknown argument \"bogus\""),
+        "got: {stderr}"
+    );
+}
+
+#[tokio::test]
 async fn binary_exits_1_on_bad_port() {
     let dir = tempfile::tempdir().unwrap();
     let config_path = dir.path().join("config.json");
