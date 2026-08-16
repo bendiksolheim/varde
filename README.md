@@ -103,6 +103,7 @@ Example config file:
 | `schedule` | String | Yes | How often this check should run. See #schedules for format |
 | `url` | Url (String) | Yes | A valid, absolute, URL you want to ping |
 | `okStatusCode` | Number | Yes | The status code you expect from a healthy call |
+| `skipTlsVerification`  | Boolean | No | Opts out of tls verification for this service. Useful for services with self signed certificates. Defaults to false |
 
 There is a set, non configurable timeout of **10 seconds** at the moment.
 

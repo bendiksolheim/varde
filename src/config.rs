@@ -35,6 +35,8 @@ pub struct ServiceConfig {
     pub url: String,
     #[serde(rename = "okStatusCode")]
     pub ok_status_code: u16,
+    #[serde(default, rename = "skipTlsVerification")]
+    pub skip_tls_verification: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -266,9 +268,11 @@ mod tests {
         assert_eq!(config.services[0].schedule.interval_seconds(), 600);
         assert_eq!(config.services[0].url, "http://192.168.1.89:4357");
         assert_eq!(config.services[0].ok_status_code, 200);
+        assert!(!config.services[0].skip_tls_verification);
         assert_eq!(config.services[1].service, "Nginx redirect");
         assert_eq!(config.services[1].schedule.interval_seconds(), 60);
         assert_eq!(config.services[1].ok_status_code, 301);
+        assert!(config.services[1].skip_tls_verification);
         assert_eq!(
             config.heartbeat,
             Some(HeartbeatConfig::HealthchecksIo {
@@ -447,6 +451,18 @@ mod tests {
         let err = load_str(&one_service("okStatusCode", "200.5")).unwrap_err();
         // Caught by typed deserialization; the path must name the field.
         assert!(err.to_string().contains("okStatusCode"), "got: {err}");
+    }
+
+    #[test]
+    fn skip_tls_verification_defaults_to_false() {
+        let config = load_str(&one_service("service", r#""a""#)).unwrap();
+        assert!(!config.services[0].skip_tls_verification);
+    }
+
+    #[test]
+    fn skip_tls_verification_can_be_enabled() {
+        let config = load_str(&one_service("skipTlsVerification", "true")).unwrap();
+        assert!(config.services[0].skip_tls_verification);
     }
 
     #[test]

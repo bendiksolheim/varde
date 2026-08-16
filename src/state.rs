@@ -12,6 +12,7 @@ pub struct ServiceStatus {
     pub ok: bool,
     pub last_checked: Timestamp,
     pub latency_ms: Option<u64>,
+    pub error: Option<String>,
 }
 
 pub struct AppState {
@@ -72,6 +73,7 @@ mod tests {
             ok,
             last_checked: "2026-07-18T12:00:00Z".parse().unwrap(),
             latency_ms: Some(42),
+            error: None,
         }
     }
 

@@ -23,6 +23,20 @@ pub fn build_client(timeout: Duration) -> reqwest::Client {
         .expect("static client configuration cannot fail to build")
 }
 
+/// Same as `build_client`, but skips TLS certificate verification entirely. Only ever
+/// hand this to services with an explicit `skipTlsVerification` opt-in (e.g. LAN devices
+/// with self-signed certs) — never to heartbeat/notify traffic, which talks to trusted
+/// public endpoints.
+pub fn build_insecure_client(timeout: Duration) -> reqwest::Client {
+    reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(timeout)
+        .user_agent(concat!("varde/", env!("CARGO_PKG_VERSION")))
+        .danger_accept_invalid_certs(true)
+        .build()
+        .expect("static client configuration cannot fail to build")
+}
+
 /// One health check. Never fails: transport errors are results (down, no latency).
 /// Completed responses always carry latency, up or down; the body is never read.
 pub async fn check_once(client: &reqwest::Client, service: &ServiceConfig) -> ServiceStatus {
@@ -31,17 +45,42 @@ pub async fn check_once(client: &reqwest::Client, service: &ServiceConfig) -> Se
     let latency_ms = start.elapsed().as_millis() as u64; // whole ms, truncated
     let last_checked = Timestamp::now();
     match response {
-        Ok(response) => ServiceStatus {
-            ok: response.status().as_u16() == service.ok_status_code,
-            last_checked,
-            latency_ms: Some(latency_ms),
-        },
-        Err(_) => ServiceStatus {
+        Ok(response) => {
+            let status_code = response.status().as_u16();
+            let ok = status_code == service.ok_status_code;
+            ServiceStatus {
+                ok,
+                last_checked,
+                latency_ms: Some(latency_ms),
+                error: (!ok).then(|| {
+                    format!(
+                        "unexpected status {status_code} (want {})",
+                        service.ok_status_code
+                    )
+                }),
+            }
+        }
+        Err(e) => ServiceStatus {
             ok: false,
             last_checked,
             latency_ms: None,
+            error: Some(describe_error(&e)),
         },
     }
+}
+
+/// `reqwest::Error`'s own message is a generic wrapper ("error sending request for url
+/// (...)") for every failure kind; the actual reason (timeout, connection refused,
+/// certificate error, ...) lives further down the source chain.
+fn describe_error(error: &dyn std::error::Error) -> String {
+    let mut message = error.to_string();
+    let mut source = error.source();
+    while let Some(err) = source {
+        message.push_str(": ");
+        message.push_str(&err.to_string());
+        source = err.source();
+    }
+    message
 }
 
 /// Immediate first check, then on schedule. Sleeping happens after the tick, until the
@@ -58,9 +97,11 @@ pub async fn check_loop(client: reqwest::Client, service: ServiceConfig, state: 
             "checked"
         );
         if !status.ok {
+            let error = status.error.as_deref().unwrap_or("");
             tracing::warn!(
                 service = service.service,
                 latency_ms = status.latency_ms,
+                error,
                 "check failed"
             );
         }
@@ -96,6 +137,44 @@ mod tests {
         build_client(Duration::from_millis(500))
     }
 
+    /// A minimal HTTPS server presenting a freshly generated self-signed certificate for
+    /// 127.0.0.1, so tests can prove the strict client rejects it and the insecure client
+    /// (`danger_accept_invalid_certs`) accepts it.
+    async fn start_self_signed_server(
+        status_code: u16,
+    ) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
+        use tokio_rustls::rustls;
+
+        let _ = rustls::crypto::ring::default_provider().install_default();
+
+        let cert = rcgen::generate_simple_self_signed(vec!["127.0.0.1".to_string()]).unwrap();
+        let cert_der = cert.cert.der().clone();
+        let key_der = rustls::pki_types::PrivateKeyDer::Pkcs8(cert.key_pair.serialize_der().into());
+        let server_config = rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(vec![cert_der], key_der)
+            .unwrap();
+        let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(server_config));
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        // Each test opens exactly one connection, so a single accept (no loop) suffices.
+        let handle = tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let (stream, _) = listener.accept().await.unwrap();
+            if let Ok(mut tls) = acceptor.accept(stream).await {
+                let mut buf = [0u8; 1024];
+                let _ = tls.read(&mut buf).await;
+                let response = format!(
+                    "HTTP/1.1 {status_code} status\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+                );
+                let _ = tls.write_all(response.as_bytes()).await;
+                let _ = tls.shutdown().await;
+            }
+        });
+        (addr, handle)
+    }
+
     #[tokio::test]
     async fn matching_status_is_up_with_latency() {
         let server = MockServer::start().await;
@@ -120,6 +199,10 @@ mod tests {
         let status = check_once(&test_client(), &service(&server.uri(), 200)).await;
         assert!(!status.ok);
         assert!(status.latency_ms.is_some());
+        assert_eq!(
+            status.error.as_deref(),
+            Some("unexpected status 500 (want 200)")
+        );
     }
 
     #[tokio::test]
@@ -159,6 +242,7 @@ mod tests {
         let status = check_once(&test_client(), &service(&server.uri(), 200)).await;
         assert!(!status.ok);
         assert_eq!(status.latency_ms, None);
+        assert!(status.error.is_some());
     }
 
     #[tokio::test]
@@ -171,6 +255,7 @@ mod tests {
         let status = check_once(&test_client(), &service(&url, 200)).await;
         assert!(!status.ok);
         assert_eq!(status.latency_ms, None);
+        assert!(status.error.is_some());
     }
 
     #[tokio::test]
@@ -186,6 +271,30 @@ mod tests {
         let status = check_once(&test_client(), &service(&url, 200)).await;
         assert!(!status.ok);
         assert_eq!(status.latency_ms, None);
+        assert!(status.error.is_some());
+    }
+
+    #[tokio::test]
+    async fn strict_client_rejects_self_signed_cert() {
+        let (addr, handle) = start_self_signed_server(200).await;
+        let url = format!("https://{addr}");
+        let status = check_once(&test_client(), &service(&url, 200)).await;
+        assert!(!status.ok);
+        assert_eq!(status.latency_ms, None);
+        let error = status.error.expect("transport error expected");
+        assert!(error.to_lowercase().contains("certificate"), "got: {error}");
+        handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn insecure_client_accepts_self_signed_cert() {
+        let (addr, handle) = start_self_signed_server(200).await;
+        let url = format!("https://{addr}");
+        let insecure_client = build_insecure_client(Duration::from_millis(500));
+        let status = check_once(&insecure_client, &service(&url, 200)).await;
+        assert!(status.ok, "error: {:?}", status.error);
+        assert!(status.latency_ms.is_some());
+        handle.await.unwrap();
     }
 
     #[tokio::test]

@@ -62,9 +62,17 @@ fn main() {
 async fn run(config: config::Config, port: u16) {
     let state = Arc::new(AppState::new(&config));
     let client = check::build_client(check::CHECK_TIMEOUT);
+    let insecure_client = check::build_insecure_client(check::CHECK_TIMEOUT);
 
     for service in config.services.clone() {
-        tokio::spawn(check::check_loop(client.clone(), service, state.clone()));
+        // Services opting into `skipTlsVerification` (e.g. LAN devices with self-signed
+        // certs) get the insecure client; everything else gets the strict one.
+        let client = if service.skip_tls_verification {
+            insecure_client.clone()
+        } else {
+            client.clone()
+        };
+        tokio::spawn(check::check_loop(client, service, state.clone()));
     }
     if let Some(hb) = config.heartbeat.clone() {
         // VARDE_HC_BASE_URL / VARDE_NTFY_BASE_URL are test seams (see README); the

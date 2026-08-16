@@ -28,6 +28,7 @@ struct ServiceEntry {
     last_checked: Option<String>,
     #[serde(rename = "latencyMs")]
     latency_ms: Option<u64>,
+    error: Option<String>,
 }
 
 pub fn router(state: Arc<AppState>) -> Router {
@@ -52,12 +53,14 @@ async fn status_handler(method: Method, State(state): State<Arc<AppState>>) -> R
                 ok: Some(status.ok),
                 last_checked: Some(format_second_precision(status.last_checked)),
                 latency_ms: status.latency_ms,
+                error: status.error,
             },
             None => ServiceEntry {
                 service,
                 ok: None,
                 last_checked: None,
                 latency_ms: None,
+                error: None,
             },
         })
         .collect();
@@ -174,7 +177,7 @@ mod tests {
         assert_eq!(code, StatusCode::OK);
         assert_eq!(
             body,
-            r#"{"operational":true,"services":[{"service":"a","ok":null,"lastChecked":null,"latencyMs":null},{"service":"b","ok":null,"lastChecked":null,"latencyMs":null}]}"#
+            r#"{"operational":true,"services":[{"service":"a","ok":null,"lastChecked":null,"latencyMs":null,"error":null},{"service":"b","ok":null,"lastChecked":null,"latencyMs":null,"error":null}]}"#
         );
     }
 
@@ -188,6 +191,7 @@ mod tests {
                 ok: true,
                 last_checked: ts,
                 latency_ms: Some(42),
+                error: None,
             },
         );
         state.record(
@@ -196,6 +200,7 @@ mod tests {
                 ok: false,
                 last_checked: ts,
                 latency_ms: Some(87), // down with latency: completed response (§2.3)
+                error: Some("unexpected status 500 (want 200)".to_string()),
             },
         );
         state.record(
@@ -204,6 +209,7 @@ mod tests {
                 ok: false,
                 last_checked: ts,
                 latency_ms: None, // down without latency: transport error
+                error: Some("connection refused".to_string()),
             },
         );
         let (code, body) = get(router(state), "GET", "/").await;
@@ -211,7 +217,7 @@ mod tests {
         // Exact field names, config order, second-precision UTC timestamps, compact JSON.
         assert_eq!(
             body,
-            r#"{"operational":false,"services":[{"service":"up","ok":true,"lastChecked":"2026-07-17T12:34:56Z","latencyMs":42},{"service":"wrong-status","ok":false,"lastChecked":"2026-07-17T12:34:56Z","latencyMs":87},{"service":"unreachable","ok":false,"lastChecked":"2026-07-17T12:34:56Z","latencyMs":null},{"service":"not-yet","ok":null,"lastChecked":null,"latencyMs":null}]}"#
+            r#"{"operational":false,"services":[{"service":"up","ok":true,"lastChecked":"2026-07-17T12:34:56Z","latencyMs":42,"error":null},{"service":"wrong-status","ok":false,"lastChecked":"2026-07-17T12:34:56Z","latencyMs":87,"error":"unexpected status 500 (want 200)"},{"service":"unreachable","ok":false,"lastChecked":"2026-07-17T12:34:56Z","latencyMs":null,"error":"connection refused"},{"service":"not-yet","ok":null,"lastChecked":null,"latencyMs":null,"error":null}]}"#
         );
     }
 
@@ -224,6 +230,7 @@ mod tests {
                 ok: true,
                 last_checked: "2026-07-17T00:00:00Z".parse().unwrap(),
                 latency_ms: Some(1),
+                error: None,
             },
         );
         let (code, body) = get(router(state), "GET", "/").await;

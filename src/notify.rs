@@ -414,6 +414,7 @@ mod tests {
                         ok,
                         last_checked: "2026-07-18T12:00:00Z".parse().unwrap(),
                         latency_ms: None,
+                        error: None,
                     }),
                 )
             })
@@ -839,6 +840,7 @@ mod tests {
                 ok: false,
                 last_checked: "2026-07-18T12:00:00Z".parse().unwrap(),
                 latency_ms: None,
+                error: None,
             },
         );
         let entry: NotifyConfig = serde_json::from_value(serde_json::json!({

@@ -10,7 +10,8 @@
       "service": "Nginx redirect",
       "schedule": "every 1 minute",
       "url": "http://server:80",
-      "okStatusCode": 301
+      "okStatusCode": 301,
+      "skipTlsVerification": true
     }
   ],
   "heartbeat": {

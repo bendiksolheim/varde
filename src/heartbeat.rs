@@ -113,6 +113,7 @@ mod tests {
                 ok,
                 last_checked: "2026-07-18T12:00:00Z".parse().unwrap(),
                 latency_ms: None,
+                error: None,
             }),
         )
     }
